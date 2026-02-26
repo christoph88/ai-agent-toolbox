@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Editor directories
+.vscode/
+.idea/
+
+# Local Claude Code settings (user-specific)
+.claude/settings.local.json

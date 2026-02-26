@@ -1,0 +1,17 @@
+{
+  "name": "mv-digital-marketplace",
+  "description": "Private plugin marketplace for Mobile Vikings digital team.",
+  "owner": {
+    "name": "Mobile Vikings"
+  },
+  "plugins": [
+    {
+      "name": "digital-toolbox",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/vikingco/digital-toolbox.git"
+      },
+      "description": "General-purpose utilities for macOS automation, scheduled tasks, and system management."
+    }
+  ]
+}
