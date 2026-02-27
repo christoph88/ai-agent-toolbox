@@ -44,6 +44,29 @@ Manages macOS scheduled tasks (LaunchAgents) via `launchd`. Supports three actio
 
 Always asks for explicit confirmation before any write or delete operation. Only manages user-level agents — never touches system daemons.
 
+### `/agent-factory`
+
+Designs and generates multi-agent collaboration systems. Describe a task or problem, and it creates a standalone TypeScript project where multiple AI agents collaborate to solve it.
+
+**Two modes:**
+- **Assisted** — describe your problem, the skill designs the agent team for you
+- **Expert** — manually define agents, roles, tools, and patterns
+
+**Features:**
+- **Three collaboration patterns:** Orchestrator + Workers (delegation), Pipeline (sequential stages), Debate (parallel proposals + judge)
+- **Per-agent sandboxing** — restrict tools, filesystem access, and network per agent
+- **Real-time terminal dashboard** — see what each agent is doing, estimated cost tracking in EUR
+- **Configurable stop conditions** — max iterations, estimated cost cap, time limit, validation checks, checkpoint prompts
+- **Shared workspace** — agents communicate via a filesystem directory
+
+**Generated projects:**
+- Run with `npx tsx src/run.ts`
+- Use your existing Claude Code subscription (no API keys needed)
+- Fully editable — tweak `src/config.ts` and rerun
+- Include `README.md` and `CLAUDE.md` documentation
+
+**Requirements:** Node.js 18+, Claude Code CLI installed and authenticated
+
 ## Adding More Skills
 
 This plugin is designed as a general-purpose toolbox. To add new utility skills:
