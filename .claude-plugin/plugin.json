@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Mobile Vikings digital team toolbox — general-purpose utilities for macOS automation, scheduled tasks, and system management.",
   "skills": [
-    "./.claude/skills/mv-launchd-manager"
+    "./.claude/skills/mv-launchd-manager",
+    "./.claude/skills/agent-factory"
   ]
 }
