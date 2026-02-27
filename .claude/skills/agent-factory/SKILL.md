@@ -172,4 +172,359 @@ Present the complete setup using `AskUserQuestion` (same format as assisted mode
 
 Then proceed to **Step 3 — Generate Project**.
 
+## Step 2 — Generate the project directory
+
+Ask the user for a project name (suggest one based on the task, e.g. `perf-audit-team`). Create the directory in CWD.
+
+```bash
+mkdir -p {project-name}/src/{agents,patterns,safety,comms,dashboard}
+mkdir -p {project-name}/workspace/{tasks,results,messages}
+```
+
+### Generate `package.json`
+
+```json
+{
+  "name": "{project-name}",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent system: {task-description}",
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "dev": "tsx watch src/run.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^1.0.0",
+    "tsx": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}
+```
+
+### Generate `tsconfig.json`
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "strict": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"]
+}
+```
+
+### Generate `src/agents/types.ts`
+
+This file defines the core interfaces. Generate it with these types:
+
+```typescript
+import type { SandboxSettings } from "@anthropic-ai/claude-agent-sdk";
+
+export type AgentModel = "opus" | "sonnet" | "haiku";
+
+export type PatternType = "orchestrator-workers" | "pipeline" | "debate";
+
+export interface AgentConfig {
+  id: string;
+  role: string;
+  systemPrompt: string;
+  allowedTools: string[];
+  disallowedTools?: string[];
+  sandbox: SandboxSettings;
+  model: AgentModel;
+  maxTurns?: number;
+}
+
+export interface StopConditions {
+  maxIterations?: number;
+  estimatedCostCapEur?: number;
+  timeLimitMinutes?: number;
+  validationCheck?: boolean;
+  checkpointEveryN?: number;
+}
+
+export interface ProjectConfig {
+  name: string;
+  description: string;
+  pattern: PatternType;
+  agents: AgentConfig[];
+  stopConditions: StopConditions;
+  workspacePath: string;
+}
+
+export interface AgentStatus {
+  id: string;
+  role: string;
+  state: "waiting" | "working" | "done" | "error" | "paused";
+  turns: number;
+  estimatedCostEur: number;
+  lastActivity: string;
+  sessionId?: string;
+}
+
+export interface RunMetrics {
+  iteration: number;
+  startTime: Date;
+  totalEstimatedCostEur: number;
+  agentStatuses: Map<string, AgentStatus>;
+}
+```
+
+### Generate `src/config.ts`
+
+Generate this file with the user's approved agent configuration filled in. Example:
+
+```typescript
+import type { ProjectConfig } from "./agents/types.js";
+
+export const config: ProjectConfig = {
+  name: "{project-name}",
+  description: "{task-description}",
+  pattern: "{chosen-pattern}",
+  agents: [
+    // Fill in from the approved agent configuration
+    {
+      id: "{agent-id}",
+      role: "{agent-role}",
+      systemPrompt: `{generated-system-prompt-based-on-role-and-task}`,
+      allowedTools: [{tools-array}],
+      sandbox: {
+        enabled: true,
+        filesystem: { allowWrite: ["./workspace/**"] },
+      },
+      model: "{chosen-model}",
+      maxTurns: {turns-or-undefined},
+    },
+    // ... repeat for each agent
+  ],
+  stopConditions: {
+    // Fill in from user's chosen stop conditions
+  },
+  workspacePath: "./workspace",
+};
+
+// EUR conversion rate (approximate, for display only)
+export const USD_TO_EUR = 0.92;
+```
+
+**Critical:** The `systemPrompt` for each agent MUST include:
+1. The agent's role and what it does
+2. The overall task description for context
+3. Instructions on how to use the workspace directory (where to read input, where to write output)
+4. For orchestrator: how to write tasks and read results
+5. For workers: how to pick up tasks and write results
+6. For pipeline agents: which stage directory to read from and write to
+7. For debate agents: where to write proposals
+
+### Generate `src/agents/factory.ts`
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentConfig, AgentStatus } from "./types.js";
+import { USD_TO_EUR } from "../config.js";
+
+export async function runAgent(
+  agent: AgentConfig,
+  prompt: string,
+  cwd: string,
+  abortController: AbortController,
+  onMessage?: (message: any) => void,
+): Promise<{ status: AgentStatus; result: string }> {
+  const status: AgentStatus = {
+    id: agent.id,
+    role: agent.role,
+    state: "working",
+    turns: 0,
+    estimatedCostEur: 0,
+    lastActivity: "Starting...",
+  };
+
+  let resultText = "";
+
+  try {
+    const q = query({
+      prompt,
+      options: {
+        systemPrompt: agent.systemPrompt,
+        allowedTools: agent.allowedTools,
+        disallowedTools: agent.disallowedTools,
+        sandbox: agent.sandbox,
+        model: agent.model,
+        maxTurns: agent.maxTurns,
+        cwd,
+        abortController,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+      },
+    });
+
+    for await (const message of q) {
+      onMessage?.(message);
+
+      if (message.type === "assistant") {
+        const content = message.message.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if ("text" in block) {
+              status.lastActivity = block.text.slice(0, 100);
+            }
+          }
+        }
+        status.turns++;
+      }
+
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          resultText = message.result ?? "";
+          status.estimatedCostEur = (message.total_cost_usd ?? 0) * USD_TO_EUR;
+          status.state = "done";
+        } else {
+          status.state = "error";
+          resultText = `Error: ${message.subtype}`;
+        }
+      }
+    }
+  } catch (err) {
+    status.state = "error";
+    status.lastActivity = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  return { status, result: resultText };
+}
+```
+
+### Generate `src/run.ts`
+
+This is the CLI entry point. It loads config, runs the chosen pattern, and displays the dashboard.
+
+```typescript
+import { config } from "./config.js";
+import { runOrchestrator } from "./patterns/orchestrator-workers.js";
+import { runPipeline } from "./patterns/pipeline.js";
+import { runDebate } from "./patterns/debate.js";
+import { createDashboard } from "./dashboard/terminal-ui.js";
+import { checkLimits } from "./safety/limits.js";
+import { promptCheckpoint } from "./safety/checkpoints.js";
+import type { RunMetrics } from "./agents/types.js";
+
+async function main() {
+  console.log(`\n🏭 Agent Factory — "${config.description}"`);
+  console.log(`Pattern: ${config.pattern} | Agents: ${config.agents.length}\n`);
+
+  const metrics: RunMetrics = {
+    iteration: 0,
+    startTime: new Date(),
+    totalEstimatedCostEur: 0,
+    agentStatuses: new Map(),
+  };
+
+  // Initialize agent statuses
+  for (const agent of config.agents) {
+    metrics.agentStatuses.set(agent.id, {
+      id: agent.id,
+      role: agent.role,
+      state: "waiting",
+      turns: 0,
+      estimatedCostEur: 0,
+      lastActivity: "Not started",
+    });
+  }
+
+  const dashboard = createDashboard(config, metrics);
+  const globalAbort = new AbortController();
+
+  // Handle Ctrl+C gracefully
+  process.on("SIGINT", () => {
+    console.log("\n\n⏹  Graceful shutdown requested...");
+    globalAbort.abort();
+  });
+
+  // Handle keyboard input for dashboard controls
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", (key) => {
+      const char = key.toString().toLowerCase();
+      if (char === "s" || char === "\u0003") { // 's' or Ctrl+C
+        globalAbort.abort();
+      } else if (char === "d") {
+        dashboard.toggleDetailView();
+      } else if (char === "p") {
+        dashboard.togglePause();
+      } else if (char === "l") {
+        dashboard.showLogs();
+      }
+    });
+  }
+
+  try {
+    const patternRunner =
+      config.pattern === "orchestrator-workers" ? runOrchestrator
+      : config.pattern === "pipeline" ? runPipeline
+      : runDebate;
+
+    await patternRunner(config, metrics, globalAbort, dashboard);
+  } catch (err) {
+    if (!globalAbort.signal.aborted) {
+      console.error("\n❌ Unexpected error:", err);
+    }
+  } finally {
+    dashboard.stop();
+    // Write final summary
+    const summary = generateSummary(metrics);
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(
+      `${config.workspacePath}/summary.md`,
+      summary,
+    );
+    console.log(`\n📋 Summary written to ${config.workspacePath}/summary.md`);
+    process.exit(0);
+  }
+}
+
+function generateSummary(metrics: RunMetrics): string {
+  const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
+  const lines = [
+    `# Agent Run Summary`,
+    ``,
+    `**Task:** ${config.description}`,
+    `**Pattern:** ${config.pattern}`,
+    `**Duration:** ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`,
+    `**Iterations:** ${metrics.iteration}`,
+    `**Total estimated cost:** ~€${metrics.totalEstimatedCostEur.toFixed(2)}`,
+    ``,
+    `## Agent Results`,
+    ``,
+    `| Agent | Role | Status | Turns | Est. Cost |`,
+    `|-------|------|--------|-------|-----------|`,
+  ];
+
+  for (const [, status] of metrics.agentStatuses) {
+    const icon = status.state === "done" ? "✅" : status.state === "error" ? "❌" : "⏳";
+    lines.push(
+      `| ${status.id} | ${status.role} | ${icon} ${status.state} | ${status.turns} | ~€${status.estimatedCostEur.toFixed(2)} |`,
+    );
+  }
+
+  lines.push("", "## Workspace Contents", "");
+  lines.push("Check `workspace/results/` for detailed outputs from each agent.");
+
+  return lines.join("\n");
+}
+
+main();
+```
+
 $ARGUMENTS
