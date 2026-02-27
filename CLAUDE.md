@@ -11,6 +11,7 @@ Private Claude Code plugin for the Mobile Vikings digital team. A general-purpos
 | Skill | Purpose |
 |-------|---------|
 | `/mv-launchd-manager` | Manages macOS scheduled tasks (LaunchAgents) via launchd — list, add, and remove jobs |
+| `/agent-factory` | Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents |
 
 Skill definitions live in `.claude/skills/{skill-name}/SKILL.md`. Registration in `.claude-plugin/plugin.json`.
 
