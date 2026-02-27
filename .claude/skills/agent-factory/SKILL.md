@@ -53,4 +53,71 @@ If `$ARGUMENTS` is empty or ambiguous, ask the user:
   - **Describe my problem** — "I'll describe what I need done and you'll design the agent team for me (recommended)"
   - **Define agents manually** — "I know exactly which agents I want — let me specify roles, tools, and patterns"
 
+## Step 1A — Assisted Mode: Task Decomposition
+
+The user has described their problem. Analyze it and design an agent team.
+
+### Analyze the task
+
+Think through:
+1. **What are the distinct phases?** (research, plan, implement, review, test, validate)
+2. **Which phases need different expertise?** (each becomes an agent)
+3. **What's the dependency structure?** (sequential → Pipeline, delegatable → Orchestrator+Workers, independent → Debate)
+4. **What tools does each phase need?** (read-only for reviewers, bash for builders, web for researchers)
+5. **What's the right model for each?** (opus for complex reasoning/review, sonnet for execution, haiku for simple checks)
+
+### Choose the pattern
+
+**Orchestrator + Workers** — best when:
+- Task can be broken into independent sub-tasks
+- A lead needs to coordinate and review
+- Work can happen in parallel
+- Example: "Build a full-stack app" → architect delegates to frontend dev, backend dev, DB designer
+
+**Pipeline** — best when:
+- Work flows sequentially through stages
+- Each stage depends on the previous stage's output
+- Clear handoff points exist
+- Example: "Migrate API from Express to Fastify" → audit → plan → implement → test → verify
+
+**Debate / Consensus** — best when:
+- Multiple valid approaches exist
+- Quality matters more than speed
+- You want diverse perspectives
+- Example: "Design our authentication strategy" → 3 architects propose independently → judge picks best
+
+### Propose the agent configuration
+
+Use `AskUserQuestion` to present the proposed setup. Include:
+
+1. **Pattern choice** and why
+2. **Agent table** with: id, role, description, tools, model, sandbox level
+3. **Communication flow** — how agents hand off work
+4. **Suggested stop conditions** — based on task complexity
+
+Example proposal format:
+
+> **Recommended pattern: Pipeline**
+>
+> Based on your task, I'd set up a 4-stage pipeline:
+>
+> | # | Agent | Role | Tools | Model |
+> |---|-------|------|-------|-------|
+> | 1 | `auditor` | Performance Auditor | Bash, Read, WebFetch | sonnet |
+> | 2 | `analyst` | Root Cause Analyst | Read, Grep, Glob | opus |
+> | 3 | `fixer` | Performance Engineer | Read, Write, Edit, Bash | sonnet |
+> | 4 | `verifier` | QA Tester | Bash, Read, WebFetch | sonnet |
+>
+> **Flow:** auditor profiles the site → analyst identifies bottlenecks → fixer implements fixes → verifier re-runs benchmarks
+>
+> **Stop conditions:** verifier confirms improvement ≥20%, or max 5 pipeline cycles, checkpoint every cycle
+
+- **Options:**
+  - **Looks good, generate it** — "Create the project with this configuration"
+  - **Adjust agents** — "I want to change roles, tools, or models"
+  - **Change pattern** — "I'd prefer a different collaboration pattern"
+  - **Change limits** — "I want different stop conditions"
+
+If the user wants adjustments, loop back and re-propose until they approve. Then proceed to **Step 3 — Generate Project**.
+
 $ARGUMENTS
