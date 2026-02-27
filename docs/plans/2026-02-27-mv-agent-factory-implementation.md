@@ -1,26 +1,26 @@
-# `/mv-agent-factory` Implementation Plan
+# `/agent-factory` Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Create the `/mv-agent-factory` skill that decomposes tasks into collaborating agents and generates standalone TypeScript runner projects using `@anthropic-ai/claude-agent-sdk`.
+**Goal:** Create the `/agent-factory` skill that decomposes tasks into collaborating agents and generates standalone TypeScript runner projects using `@anthropic-ai/claude-agent-sdk`.
 
 **Architecture:** Single SKILL.md file containing all instructions for Claude Code to (1) gather requirements via assisted or expert mode, (2) propose an agent configuration for user approval, (3) generate a complete TypeScript project in CWD. The generated project uses the Claude Agent SDK's `query()` function to spawn sandboxed agent sessions that communicate via a shared workspace directory. A terminal dashboard provides real-time monitoring.
 
 **Tech Stack:** SKILL.md (Markdown), generated projects use TypeScript + `@anthropic-ai/claude-agent-sdk` + `tsx`
 
-**Design doc:** `docs/plans/2026-02-27-mv-agent-factory-design.md`
+**Design doc:** `docs/plans/2026-02-27-agent-factory-design.md`
 
 ---
 
 ### Task 1: SKILL.md — Frontmatter + Step 0 (Determine Mode)
 
 **Files:**
-- Create: `.claude/skills/mv-agent-factory/SKILL.md`
+- Create: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Create the directory**
 
 ```bash
-mkdir -p .claude/skills/mv-agent-factory
+mkdir -p .claude/skills/agent-factory
 ```
 
 **Step 2: Write the frontmatter and Step 0**
@@ -29,7 +29,7 @@ Write the SKILL.md file with:
 
 ```markdown
 ---
-name: mv-agent-factory
+name: agent-factory
 description: Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents
 ---
 
@@ -74,7 +74,7 @@ $ARGUMENTS
 **Step 3: Verify the file was created**
 
 ```bash
-cat .claude/skills/mv-agent-factory/SKILL.md | head -5
+cat .claude/skills/agent-factory/SKILL.md | head -5
 ```
 
 Expected: the frontmatter lines
@@ -82,7 +82,7 @@ Expected: the frontmatter lines
 **Step 4: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add SKILL.md skeleton with frontmatter and Step 0"
 ```
 
@@ -91,7 +91,7 @@ git commit -m "feat(agent-factory): add SKILL.md skeleton with frontmatter and S
 ### Task 2: SKILL.md — Assisted Mode (Task Decomposition)
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add the assisted mode section**
 
@@ -169,7 +169,7 @@ If the user wants adjustments, loop back and re-propose until they approve. Then
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add assisted mode task decomposition"
 ```
 
@@ -178,7 +178,7 @@ git commit -m "feat(agent-factory): add assisted mode task decomposition"
 ### Task 3: SKILL.md — Expert Mode (Manual Agent Definition)
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add the expert mode section**
 
@@ -241,7 +241,7 @@ Then proceed to **Step 3 — Generate Project**.
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add expert mode manual agent definition"
 ```
 
@@ -250,7 +250,7 @@ git commit -m "feat(agent-factory): add expert mode manual agent definition"
 ### Task 4: SKILL.md — Project Generation: Core Files
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add the project generation section with core file templates**
 
@@ -615,7 +615,7 @@ main();
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add project generation — core files, types, factory, runner"
 ```
 
@@ -624,7 +624,7 @@ git commit -m "feat(agent-factory): add project generation — core files, types
 ### Task 5: SKILL.md — Project Generation: Pattern Implementations
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add the pattern implementation templates**
 
@@ -676,7 +676,7 @@ Each pattern function must:
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add pattern implementation templates"
 ```
 
@@ -685,7 +685,7 @@ git commit -m "feat(agent-factory): add pattern implementation templates"
 ### Task 6: SKILL.md — Project Generation: Safety, Dashboard, Comms
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add safety, dashboard, and communication file templates**
 
@@ -872,7 +872,7 @@ Keep the dashboard implementation simple — use raw ANSI codes and `process.std
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add safety, dashboard, and comms templates"
 ```
 
@@ -881,7 +881,7 @@ git commit -m "feat(agent-factory): add safety, dashboard, and comms templates"
 ### Task 7: SKILL.md — Project Generation: README.md and CLAUDE.md
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add README.md and CLAUDE.md generation instructions**
 
@@ -890,7 +890,7 @@ git commit -m "feat(agent-factory): add safety, dashboard, and comms templates"
 ```markdown
 # {project-name}
 
-> Generated by `/mv-agent-factory` on {date}
+> Generated by `/agent-factory` on {date}
 
 ## Task
 
@@ -963,7 +963,7 @@ Estimated costs shown in EUR (~€) are informational only. They represent what 
 
 ## What This Is
 
-A multi-agent collaboration project generated by `/mv-agent-factory`. {agent-count} agents work together using the "{pattern}" pattern to: {task-description}.
+A multi-agent collaboration project generated by `/agent-factory`. {agent-count} agents work together using the "{pattern}" pattern to: {task-description}.
 
 ## Tech Stack
 
@@ -1003,7 +1003,7 @@ npx tsx src/run.ts
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add README and CLAUDE.md generation templates"
 ```
 
@@ -1012,7 +1012,7 @@ git commit -m "feat(agent-factory): add README and CLAUDE.md generation template
 ### Task 8: SKILL.md — Offer to Run + Error Handling
 
 **Files:**
-- Modify: `.claude/skills/mv-agent-factory/SKILL.md`
+- Modify: `.claude/skills/agent-factory/SKILL.md`
 
 **Step 1: Add the post-generation step and error handling**
 
@@ -1052,7 +1052,7 @@ cd {project-name} && npx tsx src/run.ts
 **Step 2: Commit**
 
 ```bash
-git add .claude/skills/mv-agent-factory/SKILL.md
+git add .claude/skills/agent-factory/SKILL.md
 git commit -m "feat(agent-factory): add run offer and error handling"
 ```
 
@@ -1074,7 +1074,7 @@ Update the `skills` array in `.claude-plugin/plugin.json`:
   "description": "Mobile Vikings digital team toolbox — general-purpose utilities for macOS automation, scheduled tasks, and system management.",
   "skills": [
     "./.claude/skills/mv-launchd-manager",
-    "./.claude/skills/mv-agent-factory"
+    "./.claude/skills/agent-factory"
   ]
 }
 ```
@@ -1101,14 +1101,14 @@ In the `## Skills` section, add a row:
 | Skill | Purpose |
 |-------|---------|
 | `/mv-launchd-manager` | Manages macOS scheduled tasks (LaunchAgents) via launchd — list, add, and remove jobs |
-| `/mv-agent-factory` | Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents |
+| `/agent-factory` | Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents |
 ```
 
 **Step 2: Commit**
 
 ```bash
 git add CLAUDE.md
-git commit -m "docs: add /mv-agent-factory to CLAUDE.md skills table"
+git commit -m "docs: add /agent-factory to CLAUDE.md skills table"
 ```
 
 ---
@@ -1123,7 +1123,7 @@ git commit -m "docs: add /mv-agent-factory to CLAUDE.md skills table"
 In the `## Skills` section, after the `/mv-launchd-manager` subsection, add:
 
 ```markdown
-### `/mv-agent-factory`
+### `/agent-factory`
 
 Designs and generates multi-agent collaboration systems. Describe a task or problem, and it creates a standalone TypeScript project where multiple AI agents collaborate to solve it.
 
@@ -1151,7 +1151,7 @@ Designs and generates multi-agent collaboration systems. Describe a task or prob
 
 ```bash
 git add README.md
-git commit -m "docs: add /mv-agent-factory to README.md"
+git commit -m "docs: add /agent-factory to README.md"
 ```
 
 ---
@@ -1161,7 +1161,7 @@ git commit -m "docs: add /mv-agent-factory to README.md"
 **Step 1: Verify all files exist**
 
 ```bash
-ls -la .claude/skills/mv-agent-factory/SKILL.md
+ls -la .claude/skills/agent-factory/SKILL.md
 cat .claude-plugin/plugin.json
 ```
 
@@ -1179,7 +1179,7 @@ Expected: nothing to commit, all tasks have individual commits.
 **Step 3: Review the full SKILL.md**
 
 ```bash
-wc -l .claude/skills/mv-agent-factory/SKILL.md
+wc -l .claude/skills/agent-factory/SKILL.md
 ```
 
 Verify it contains all sections: frontmatter, SDK context, Step 0, Step 1A (assisted), Step 1B (expert), Step 2 (generate project with all file templates), Step 3 (run + error handling).

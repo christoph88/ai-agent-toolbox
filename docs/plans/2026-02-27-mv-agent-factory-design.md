@@ -1,4 +1,4 @@
-# Design: `/mv-agent-factory` Skill
+# Design: `/agent-factory` Skill
 
 **Date:** 2026-02-27
 **Status:** Approved
@@ -161,7 +161,7 @@ This uses the SDK's streaming (`for await` on `query()`) to capture real-time ag
 digital-toolbox/
 ├── .claude/skills/
 │   ├── mv-launchd-manager/SKILL.md   (existing)
-│   └── mv-agent-factory/SKILL.md     (new)
+│   └── agent-factory/SKILL.md     (new)
 ├── .claude-plugin/plugin.json         (update: add new skill path)
 ├── CLAUDE.md                          (update: add skill to table)
 └── README.md                          (update: add skill docs)
