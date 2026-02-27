@@ -13,7 +13,7 @@ You manage macOS scheduled tasks (LaunchAgents) for the user. You can list exist
 - User-level scheduled jobs live as `.plist` files in `~/Library/LaunchAgents/`
 - System-level jobs live in `/Library/LaunchDaemons/` — we do NOT touch those
 - `launchctl` is the CLI to load/unload/inspect jobs
-- A job can be scheduled by **calendar interval** (like cron) or **fixed interval** (every N seconds)
+- A job can be scheduled by **calendar interval** (like cron) or **fixed interval** (every N seconds). **Prefer `StartCalendarInterval`** — it catches missed runs after sleep/wake, while `StartInterval` just counts elapsed seconds
 - Labels use reverse-DNS convention: `com.user.{name}`
 
 ## Step 0 — Determine the action
@@ -101,14 +101,19 @@ If not already clear from `$ARGUMENTS`, ask the user for:
 1. **What to run** — full path to script or command with arguments
 2. **When to run** — ask in natural language, then you translate to the right plist keys
 
+**Prefer `StartCalendarInterval` over `StartInterval`** — it handles missed runs on wake/sleep better. Only fall back to `StartInterval` for sub-minute intervals that can't be expressed with calendar fields.
+
 Examples of schedule translation:
-- "every hour" → `StartInterval: 3600`
+- "every hour" → `StartCalendarInterval: { Minute: 0 }` (fires at the top of every hour)
+- "every 30 minutes" → `StartCalendarInterval: [{ Minute: 0 }, { Minute: 30 }]` (fires at :00 and :30)
+- "every 15 minutes" → `StartCalendarInterval: [{ Minute: 0 }, { Minute: 15 }, { Minute: 30 }, { Minute: 45 }]`
 - "every day at 9am" → `StartCalendarInterval: { Hour: 9, Minute: 0 }`
 - "every Monday at 8:30" → `StartCalendarInterval: { Weekday: 1, Hour: 8, Minute: 30 }`
-- "every 5 minutes" → `StartInterval: 300`
+- "every 5 minutes" → `StartCalendarInterval: [{ Minute: 0 }, { Minute: 5 }, { Minute: 10 }, { Minute: 15 }, { Minute: 20 }, { Minute: 25 }, { Minute: 30 }, { Minute: 35 }, { Minute: 40 }, { Minute: 45 }, { Minute: 50 }, { Minute: 55 }]`
 - "1st of every month at midnight" → `StartCalendarInterval: { Day: 1, Hour: 0, Minute: 0 }`
 - "on login" → `RunAtLoad: true` (no interval)
 - "in 5 minutes" / "once at 14:30" → One-time job (see **One-time jobs** section below)
+- "every 30 seconds" → `StartInterval: 30` (sub-minute, can't use calendar)
 
 3. **Label** — suggest one based on the script name: `com.user.{script-name}`. Let the user override.
 
@@ -142,7 +147,7 @@ Build the XML plist. Template:
         <string>{arg1}</string>
     </array>
 
-    <!-- For calendar-based schedule: -->
+    <!-- Preferred: calendar-based schedule (handles wake/sleep better) -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -151,10 +156,16 @@ Build the XML plist. Template:
         <integer>{minute}</integer>
         <!-- Add Weekday, Day, Month as needed -->
     </dict>
+    <!-- For repeating intervals like "every hour", use an array: -->
+    <!-- <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+    </array> -->
 
-    <!-- OR for interval-based schedule: -->
-    <key>StartInterval</key>
-    <integer>{seconds}</integer>
+    <!-- Fallback ONLY for sub-minute intervals: -->
+    <!-- <key>StartInterval</key>
+    <integer>{seconds}</integer> -->
 
     <!-- Optional: run immediately when loaded -->
     <key>RunAtLoad</key>
