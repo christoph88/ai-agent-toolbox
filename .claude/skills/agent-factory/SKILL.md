@@ -527,4 +527,55 @@ function generateSummary(metrics: RunMetrics): string {
 main();
 ```
 
+### Generate `src/patterns/orchestrator-workers.ts`
+
+The orchestrator runs in a loop:
+1. Reads the task description and any previous results from `workspace/results/`
+2. Decides what sub-tasks to delegate (writes JSON to `workspace/tasks/{worker-id}-task-{n}.json`)
+3. Each worker gets spawned with a prompt that includes its task file content
+4. Worker writes result to `workspace/results/{worker-id}-result-{n}.md`
+5. Orchestrator reads all results, decides if done or needs more work
+6. Loops until done or stop condition hit
+
+The orchestrator agent's prompt each iteration should be:
+> "You are coordinating a team. Here is the overall task: {task}. Here are the results so far: {results}. Write new task assignments to workspace/tasks/ or declare the task DONE by writing a file workspace/DONE.md with the final summary."
+
+Workers receive:
+> "You are a {role}. Your assignment is in workspace/tasks/{your-task-file}. Read it, complete the work, and write your result to workspace/results/{your-result-file}."
+
+### Generate `src/patterns/pipeline.ts`
+
+Sequential execution:
+1. Agent 1 receives the task, writes output to `workspace/stage-1/`
+2. Agent 2 reads `workspace/stage-1/`, processes, writes to `workspace/stage-2/`
+3. Continue for all stages
+4. Last agent writes final output to `workspace/results/final.md`
+5. If validation is enabled, a validation pass checks the final output
+6. If validation fails, loop back to stage 1 with feedback
+
+Each pipeline agent's prompt:
+> "You are the {role} (stage {n} of {total}). Read your input from workspace/stage-{n-1}/ (or the task description if you're stage 1). Do your work and write your output to workspace/stage-{n}/."
+
+### Generate `src/patterns/debate.ts`
+
+Parallel proposals + judge:
+1. All debate agents receive the same task simultaneously (use `Promise.allSettled`)
+2. Each writes their proposal to `workspace/proposals/{agent-id}.md`
+3. Judge agent reads all proposals from `workspace/proposals/`
+4. Judge writes verdict to `workspace/results/verdict.md`
+5. If validation is enabled, check if the verdict meets criteria
+
+Judge prompt:
+> "You are the judge. Read all proposals in workspace/proposals/. Evaluate each on {criteria}. Pick the best one or synthesize a combined solution. Write your verdict to workspace/results/verdict.md with reasoning."
+
+### Pattern implementation requirements
+
+Each pattern function must:
+- Accept `(config, metrics, abortController, dashboard)` arguments
+- Check `abortController.signal.aborted` before each iteration
+- Call `checkLimits(metrics, config.stopConditions)` after each iteration
+- Call `promptCheckpoint(metrics, config.stopConditions)` at checkpoint intervals
+- Update `metrics.agentStatuses` and `metrics.totalEstimatedCostEur` in real-time
+- Call `dashboard.update()` after each status change
+
 $ARGUMENTS
