@@ -120,4 +120,56 @@ Example proposal format:
 
 If the user wants adjustments, loop back and re-propose until they approve. Then proceed to **Step 3 — Generate Project**.
 
+## Step 1B — Expert Mode: Manual Agent Definition
+
+The user wants to define agents manually. Gather the configuration step by step.
+
+### Gather pattern choice
+
+Ask the user:
+- **Question:** "Which collaboration pattern?"
+- **Options:**
+  - **Orchestrator + Workers** — "One lead agent delegates to specialized workers"
+  - **Pipeline** — "Agents run sequentially, each handling a stage"
+  - **Debate / Consensus** — "Multiple agents tackle the problem independently, a judge picks the best"
+
+### Gather agent definitions
+
+For each agent, ask:
+1. **id** — short unique identifier (e.g., `researcher`, `developer`, `reviewer`)
+2. **role** — human-readable role name
+3. **What it does** — one sentence describing its job (you'll turn this into a system prompt)
+4. **Tools** — which Claude Code tools it can use. Offer presets:
+   - **Read-only:** Read, Glob, Grep
+   - **Developer:** Read, Write, Edit, Bash, Glob, Grep
+   - **Researcher:** Read, Glob, Grep, WebSearch, WebFetch
+   - **Full access:** All tools
+   - **Custom:** Let me pick specific tools
+5. **Model** — opus (smartest, best for review/reasoning), sonnet (balanced, good default), haiku (fastest, good for simple checks)
+6. **Sandbox level:**
+   - **Strict** — read/write only to `workspace/` and project directory
+   - **Moderate** — project directory + standard dev tools (recommended)
+   - **Open** — minimal restrictions (only for trusted tasks)
+
+Ask "Add another agent?" after each one. Minimum 2 agents.
+
+### Gather stop conditions
+
+Ask using `AskUserQuestion` with multiSelect:
+- **Question:** "Which stop conditions do you want? (select all that apply)"
+- **Options:**
+  - **Max iterations** — "Stop after N orchestrator rounds or pipeline cycles"
+  - **Estimated cost cap** — "Stop when estimated cost exceeds €X (informational — you're on subscription)"
+  - **Time limit** — "Stop after N minutes/hours of wall-clock time"
+  - **Validation check** — "An agent evaluates whether the task is actually done"
+  - **Checkpoint prompts** — "Pause and ask me every N iterations whether to continue"
+
+For each selected condition, ask for the specific value (e.g., "How many max iterations?", "What's the estimated cost cap in EUR?").
+
+### Confirm the full configuration
+
+Present the complete setup using `AskUserQuestion` (same format as assisted mode proposal). Get user approval before generating.
+
+Then proceed to **Step 3 — Generate Project**.
+
 $ARGUMENTS
