@@ -885,4 +885,35 @@ npx tsx src/run.ts
 # USD_TO_EUR_RATE=0.92
 ```
 
+## Step 3 — Install dependencies and offer to run
+
+After generating all files:
+
+1. Install dependencies:
+   ```bash
+   cd {project-name} && npm install
+   ```
+
+2. Confirm success to the user. Show what was created.
+
+3. Ask the user:
+   - **Question:** "Project generated! What do you want to do?"
+   - **Options:**
+     - **Run it now** — "Start the agents immediately with `npx tsx src/run.ts`"
+     - **I'll run it later** — "I'll review the code first and run manually"
+     - **Open config** — "Let me tweak the agent configuration before running"
+
+If the user chooses to run, execute:
+```bash
+cd {project-name} && npx tsx src/run.ts
+```
+
+## Error handling
+
+- **SDK not installed:** If `npm install` fails for `@anthropic-ai/claude-agent-sdk`, check that the user has Claude Code installed and authenticated. The SDK uses the same auth as the CLI.
+- **Permission errors during agent run:** If an agent hits a permission error, the dashboard will show it. Suggest adjusting the `sandbox` or `allowedTools` in `config.ts`.
+- **Agent stuck in loop:** The checkpoint system catches this. If no checkpoint is configured and an agent loops, the time limit or manual stop (Ctrl+C) will catch it.
+- **Workspace conflicts:** If agents write conflicting files, the pattern implementation handles ordering. For orchestrator pattern, only one agent runs at a time per task. For pipeline, stages are sequential. For debate, agents write to separate files.
+- **Cost overrun:** The estimated cost cap triggers a graceful stop. Since it's subscription-based, this is informational — but it's still a good proxy for "this task is consuming a lot of resources."
+
 $ARGUMENTS
