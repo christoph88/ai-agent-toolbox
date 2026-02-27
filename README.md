@@ -1,36 +1,26 @@
-# Digital Toolbox
+# AI Agent Toolbox
 
-Private Claude Code plugin for the Mobile Vikings digital team. A general-purpose toolbox for macOS automation and system management utilities.
+Claude Code plugin with general-purpose utilities for macOS automation, scheduled tasks, and multi-agent systems.
 
 ## Installation
 
-### 1. Authenticate with GitHub
-
-The plugin installs via `git clone`, so git needs access to this private repo. The easiest way:
-
-```bash
-gh auth login
-```
-
-This configures git credentials automatically for both HTTPS and `gh` commands.
-
-### 2. Add the marketplace
+### 1. Add the marketplace
 
 In Claude Code, run:
 
 ```
-/plugin marketplace add https://github.com/vikingco/digital-toolbox
+/plugin marketplace add https://github.com/christoph88/ai-agent-toolbox
 ```
 
-### 3. Install the plugin
+### 2. Install the plugin
 
 ```
-/plugin install digital-toolbox@mv-digital-marketplace
+/plugin install ai-agent-toolbox@ai-agent-toolbox
 ```
 
-### 4. Verify
+### 3. Verify
 
-Run `/plugin` in Claude Code to open the plugin manager. You should see `digital-toolbox` under the "Installed" tab.
+Run `/plugin` in Claude Code to open the plugin manager. You should see `ai-agent-toolbox` under the "Installed" tab.
 
 ## Skills
 
@@ -93,7 +83,7 @@ This plugin is designed as a general-purpose toolbox. To add new utility skills:
 
 The plugin stays in sync with the GitHub repo automatically:
 
-- **Automatic updates** — Claude Code checks for plugin updates at the start of each session. When changes are pushed to the repo, teammates get them on their next session.
+- **Automatic updates** — Claude Code checks for plugin updates at the start of each session. When changes are pushed to the repo, users get them on their next session.
 - **Manual refresh** — Open `/plugin` in Claude Code, go to the "Installed" tab, and refresh the plugin to pull the latest version immediately.
 - **No reinstall needed** — You only run `/plugin marketplace add` and `/plugin install` once. After that, updates flow through automatically.
 
@@ -119,5 +109,4 @@ When adding or modifying skills, update both files.
 ## Requirements
 
 - Claude Code CLI
-- GitHub access token with repo read permissions (for private repo)
 - macOS (for launchd-based skills)

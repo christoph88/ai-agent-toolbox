@@ -1,17 +1,17 @@
 {
-  "name": "mv-digital-marketplace",
-  "description": "Private plugin marketplace for Mobile Vikings digital team.",
+  "name": "ai-agent-toolbox",
+  "description": "Plugin marketplace for AI agent utilities — macOS automation, scheduled tasks, and multi-agent systems.",
   "owner": {
-    "name": "Mobile Vikings"
+    "name": "christoph88"
   },
   "plugins": [
     {
-      "name": "digital-toolbox",
+      "name": "ai-agent-toolbox",
       "source": {
         "source": "url",
-        "url": "https://github.com/vikingco/digital-toolbox.git"
+        "url": "https://github.com/christoph88/ai-agent-toolbox.git"
       },
-      "description": "General-purpose utilities for macOS automation, scheduled tasks, and system management."
+      "description": "General-purpose utilities for macOS automation, scheduled tasks, and multi-agent systems."
     }
   ]
 }

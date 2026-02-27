@@ -4,7 +4,7 @@ This file provides context for Claude Code when working in this repository.
 
 ## What This Repo Is
 
-Private Claude Code plugin for the Mobile Vikings digital team. A general-purpose toolbox for macOS automation and system management utilities. Distributed as a GitHub-based marketplace plugin — the repo **is** the distribution, no build step needed. Pushing to `master` auto-updates all teammates on their next session.
+Claude Code plugin — a general-purpose toolbox for macOS automation, scheduled tasks, and multi-agent systems. Distributed as a GitHub-based marketplace plugin — the repo **is** the distribution, no build step needed. Pushing to `master` auto-updates all users on their next session.
 
 ## Skills
 

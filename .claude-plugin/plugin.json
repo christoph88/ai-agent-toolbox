@@ -1,7 +1,7 @@
 {
-  "name": "digital-toolbox",
+  "name": "ai-agent-toolbox",
   "version": "1.0.0",
-  "description": "Mobile Vikings digital team toolbox — general-purpose utilities for macOS automation, scheduled tasks, and system management.",
+  "description": "AI agent toolbox — general-purpose utilities for macOS automation, scheduled tasks, and multi-agent systems.",
   "skills": [
     "./.claude/skills/mv-launchd-manager",
     "./.claude/skills/agent-factory"
