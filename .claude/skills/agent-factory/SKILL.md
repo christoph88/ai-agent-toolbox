@@ -578,4 +578,192 @@ Each pattern function must:
 - Update `metrics.agentStatuses` and `metrics.totalEstimatedCostEur` in real-time
 - Call `dashboard.update()` after each status change
 
+### Generate `src/safety/limits.ts`
+
+Checks all stop conditions:
+
+```typescript
+import type { RunMetrics, StopConditions } from "../agents/types.js";
+
+export interface LimitCheckResult {
+  shouldStop: boolean;
+  reason?: string;
+}
+
+export function checkLimits(
+  metrics: RunMetrics,
+  limits: StopConditions,
+): LimitCheckResult {
+  // Check iteration limit
+  if (limits.maxIterations && metrics.iteration >= limits.maxIterations) {
+    return { shouldStop: true, reason: `Max iterations reached (${limits.maxIterations})` };
+  }
+
+  // Check estimated cost cap
+  if (limits.estimatedCostCapEur && metrics.totalEstimatedCostEur >= limits.estimatedCostCapEur) {
+    return {
+      shouldStop: true,
+      reason: `Estimated cost cap reached (~€${metrics.totalEstimatedCostEur.toFixed(2)} / €${limits.estimatedCostCapEur})`,
+    };
+  }
+
+  // Check time limit
+  if (limits.timeLimitMinutes) {
+    const elapsedMinutes = (Date.now() - metrics.startTime.getTime()) / 60_000;
+    if (elapsedMinutes >= limits.timeLimitMinutes) {
+      return { shouldStop: true, reason: `Time limit reached (${limits.timeLimitMinutes} minutes)` };
+    }
+  }
+
+  return { shouldStop: false };
+}
+```
+
+### Generate `src/safety/checkpoints.ts`
+
+Pauses and asks the user to continue:
+
+```typescript
+import * as readline from "node:readline";
+import type { RunMetrics, StopConditions } from "../agents/types.js";
+
+export async function promptCheckpoint(
+  metrics: RunMetrics,
+  limits: StopConditions,
+): Promise<boolean> {
+  if (!limits.checkpointEveryN) return true;
+  if (metrics.iteration % limits.checkpointEveryN !== 0) return true;
+  if (metrics.iteration === 0) return true;
+
+  const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
+
+  console.log("\n" + "=".repeat(60));
+  console.log("⏸  CHECKPOINT — Iteration", metrics.iteration);
+  console.log(`   Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`);
+  console.log(`   Estimated cost: ~€${metrics.totalEstimatedCostEur.toFixed(2)}`);
+  console.log("=".repeat(60));
+
+  for (const [, status] of metrics.agentStatuses) {
+    const icon = status.state === "done" ? "✅" : status.state === "working" ? "🔄" : "⏳";
+    console.log(`   ${icon} ${status.id} (${status.role}): ${status.lastActivity}`);
+  }
+
+  console.log("=".repeat(60));
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question("\nContinue? [Y/n] ", resolve);
+  });
+  rl.close();
+
+  return answer.toLowerCase() !== "n";
+}
+```
+
+### Generate `src/safety/sandbox.ts`
+
+Generates per-agent sandbox configs:
+
+```typescript
+import type { SandboxSettings } from "@anthropic-ai/claude-agent-sdk";
+
+export type SandboxLevel = "strict" | "moderate" | "open";
+
+export function createSandbox(
+  level: SandboxLevel,
+  projectDir: string,
+  workspacePath: string,
+): SandboxSettings {
+  switch (level) {
+    case "strict":
+      return {
+        enabled: true,
+        filesystem: {
+          allowWrite: [`${workspacePath}/**`],
+          denyRead: [`${projectDir}/.env*`],
+        },
+        network: { allowManagedDomainsOnly: true, allowedDomains: [] },
+      };
+    case "moderate":
+      return {
+        enabled: true,
+        filesystem: {
+          allowWrite: [`${projectDir}/**`, `${workspacePath}/**`],
+        },
+        network: { allowLocalBinding: true },
+      };
+    case "open":
+      return { enabled: false };
+  }
+}
+```
+
+### Generate `src/comms/shared-fs.ts`
+
+Workspace read/write utilities:
+
+```typescript
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
+export async function writeTask(workspacePath: string, agentId: string, iteration: number, content: string): Promise<string> {
+  const filePath = path.join(workspacePath, "tasks", `${agentId}-task-${iteration}.json`);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content, "utf-8");
+  return filePath;
+}
+
+export async function writeResult(workspacePath: string, agentId: string, iteration: number, content: string): Promise<string> {
+  const filePath = path.join(workspacePath, "results", `${agentId}-result-${iteration}.md`);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content, "utf-8");
+  return filePath;
+}
+
+export async function readAllResults(workspacePath: string): Promise<Map<string, string>> {
+  const resultsDir = path.join(workspacePath, "results");
+  const results = new Map<string, string>();
+  try {
+    const files = await fs.readdir(resultsDir);
+    for (const file of files) {
+      const content = await fs.readFile(path.join(resultsDir, file), "utf-8");
+      results.set(file, content);
+    }
+  } catch {
+    // No results yet
+  }
+  return results;
+}
+
+export async function writeMessage(workspacePath: string, from: string, to: string, content: string): Promise<void> {
+  const filePath = path.join(workspacePath, "messages", `${from}-to-${to}-${Date.now()}.json`);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify({ from, to, content, timestamp: new Date().toISOString() }), "utf-8");
+}
+
+export async function checkDone(workspacePath: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(workspacePath, "DONE.md"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+### Generate `src/dashboard/terminal-ui.ts`
+
+Generate a terminal UI that:
+- Renders an overview table (all agents, status, turns, estimated cost, last activity) using ANSI escape codes for formatting
+- Supports keyboard controls: `P` (pause/resume), `S` (stop), `D` (toggle detail view), `L` (show logs)
+- In detail view: shows streaming output for the selected agent, arrow keys to switch agents
+- Updates in-place using `\x1b[2J\x1b[H` (clear screen) on a 500ms interval
+- Has a `update()` method called by the pattern runner after each status change
+- Has a `stop()` method for graceful cleanup
+- Shows the task name, pattern, elapsed time, iteration count, and total estimated cost in a header bar
+- Uses box-drawing characters (╔═╗║╚╝) for borders
+- Uses emoji for status: ✅ done, 🔄 working, ⏳ waiting, ❌ error, ⏸ paused
+
+Keep the dashboard implementation simple — use raw ANSI codes and `process.stdout.write`, no external TUI library needed. This keeps dependencies minimal.
+
 $ARGUMENTS
