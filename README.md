@@ -46,8 +46,12 @@ Designs and generates multi-agent collaboration systems. Describe a task or prob
 - **Three collaboration patterns:** Orchestrator + Workers (delegation), Pipeline (sequential stages), Debate (parallel proposals + judge)
 - **Per-agent sandboxing** — restrict tools, filesystem access, and network per agent
 - **Real-time terminal dashboard** — see what each agent is doing, estimated cost tracking in EUR
+- **Interactive messaging `[M]`** — interrupt a running agent and inject a human message; it resumes with full context
+- **Log tailing `[T]`** — view an agent's conversation transcript live from the dashboard
+- **Agent conversation logging** — full timestamped transcripts saved to `workspace/logs/`
 - **Configurable stop conditions** — max iterations, estimated cost cap, time limit, validation checks, checkpoint prompts
 - **Shared workspace** — agents communicate via a filesystem directory
+- **Discord notifications** — optional webhook integration for run start/completion alerts
 
 **Generated projects:**
 - Run with `npx tsx src/run.ts`
