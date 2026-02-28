@@ -1,5 +1,5 @@
 ---
-name: mv-launchd-manager
+name: launchd
 description: List, add, and remove scheduled terminal scripts on macOS using launchd
 ---
 

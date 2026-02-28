@@ -24,7 +24,7 @@ Run `/plugin` in Claude Code to open the plugin manager. You should see `ai-agen
 
 ## Skills
 
-### `/mv-launchd-manager`
+### `/launchd`
 
 Manages macOS scheduled tasks (LaunchAgents) via `launchd`. Supports three actions:
 
@@ -34,7 +34,7 @@ Manages macOS scheduled tasks (LaunchAgents) via `launchd`. Supports three actio
 
 Always asks for explicit confirmation before any write or delete operation. Only manages user-level agents — never touches system daemons.
 
-### `/agent-factory`
+### `/factory`
 
 Designs and generates multi-agent collaboration systems. Describe a task or problem, and it creates a standalone TypeScript project where multiple AI agents collaborate to solve it.
 

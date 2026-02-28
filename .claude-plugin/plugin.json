@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "macOS automation, scheduled tasks, and multi-agent systems.",
   "skills": [
-    "./.claude/skills/mv-launchd-manager",
-    "./.claude/skills/agent-factory"
+    "./.claude/skills/launchd",
+    "./.claude/skills/factory"
   ]
 }

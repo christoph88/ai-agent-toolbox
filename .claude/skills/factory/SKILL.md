@@ -1,5 +1,5 @@
 ---
-name: agent-factory
+name: factory
 description: Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents
 ---
 
