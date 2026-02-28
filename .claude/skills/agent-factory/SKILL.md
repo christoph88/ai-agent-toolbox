@@ -397,7 +397,7 @@ export const USD_TO_EUR = 0.92;
 
 This file includes:
 - **Agent message logging** — writes timestamped conversations to `{logDir}/{agentId}.log`
-- **Active agent registry** — tracks running agents so the `[M]` key can send messages to them
+- **Active agent registry** — tracks running agents so the input bar can send messages to them
 - **Interrupt + resume** — when a human sends a message, the agent's query is interrupted and resumed with the message injected into the conversation
 
 ```typescript
@@ -407,6 +407,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentConfig, AgentStatus } from "./types.js";
 import { USD_TO_EUR } from "../config.js";
+import { appendStream } from "../comms/shared-fs.js";
 
 function timestamp(): string {
   const d = new Date();
@@ -421,7 +422,7 @@ async function appendLog(logFile: string, text: string): Promise<void> {
   }
 }
 
-// Registry of currently running agents — used by [M] key to send messages
+// Registry of currently running agents — used by the input bar to send messages
 export interface ActiveAgent {
   readonly id: string;
   readonly role: string;
@@ -436,6 +437,7 @@ export async function runAgent(
   abortController: AbortController,
   onMessage?: (message: any) => void,
   logDir?: string,
+  workspacePath?: string,
 ): Promise<{ status: AgentStatus; result: string }> {
   const status: AgentStatus = {
     id: agent.id,
@@ -444,6 +446,11 @@ export async function runAgent(
     turns: 0,
     estimatedCostEur: 0,
     lastActivity: "Starting...",
+  };
+
+  // Helper to write to both per-agent log and unified stream
+  const stream = (line: string) => {
+    if (workspacePath) appendStream(workspacePath, line);
   };
 
   let resultText = "";
@@ -463,6 +470,8 @@ export async function runAgent(
       }
     },
   });
+
+  stream(`[${timestamp()}] START ${agent.id} (${agent.role}) — model: ${agent.model}\n`);
 
   try {
     let currentPrompt = prompt;
@@ -488,6 +497,7 @@ export async function runAgent(
 
       if (logFile && isResume) {
         appendLog(logFile, `[${timestamp()}] === HUMAN MESSAGE ===\n${currentPrompt}\n\n`);
+        stream(`[${timestamp()}] HMSG  ${agent.id} <- human: ${currentPrompt.slice(0, 120).replace(/\n/g, " ")}\n`);
       }
 
       for await (const message of currentQuery) {
@@ -502,12 +512,14 @@ export async function runAgent(
                 if (logFile) {
                   appendLog(logFile, `[${timestamp()}] === ASSISTANT (turn ${status.turns + 1}) ===\n${block.text}\n\n`);
                 }
+                stream(`[${timestamp()}] THINK ${agent.id}: ${block.text.slice(0, 150).replace(/\n/g, " ")}\n`);
               }
               if ("type" in block && block.type === "tool_use") {
                 if (logFile) {
                   const input = JSON.stringify(block.input).slice(0, 500);
                   appendLog(logFile, `[${timestamp()}] === TOOL CALL: ${block.name} ===\n${input}\n\n`);
                 }
+                stream(`[${timestamp()}] TOOL  ${agent.id} -> ${block.name}\n`);
               }
               if ("type" in block && block.type === "tool_result") {
                 if (logFile) {
@@ -531,12 +543,14 @@ export async function runAgent(
             if (logFile) {
               appendLog(logFile, `[${timestamp()}] === RESULT: success | Cost: $${(message.total_cost_usd ?? 0).toFixed(2)} | Session: ${message.session_id ?? "n/a"} ===\n\n`);
             }
+            stream(`[${timestamp()}] END   ${agent.id} — success | cost: $${(message.total_cost_usd ?? 0).toFixed(2)}\n`);
           } else {
             status.state = "error";
             resultText = `Error: ${message.subtype}`;
             if (logFile) {
               appendLog(logFile, `[${timestamp()}] === RESULT: ${message.subtype} ===\n\n`);
             }
+            stream(`[${timestamp()}] ERROR ${agent.id} — ${message.subtype}\n`);
           }
         }
       }
@@ -556,6 +570,7 @@ export async function runAgent(
   } catch (err) {
     status.state = "error";
     status.lastActivity = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    stream(`[${timestamp()}] ERROR ${agent.id} — ${err instanceof Error ? err.message : String(err)}\n`);
   } finally {
     activeAgents.delete(agent.id);
     currentQuery = null;
@@ -570,15 +585,12 @@ export async function runAgent(
 This is the CLI entry point. It loads config, runs the chosen pattern, and displays the dashboard. It includes:
 - **Force quit** — double-press S or Ctrl+C for immediate exit
 - **SIGTERM handler** — graceful shutdown on SIGTERM
-- **Interactive messaging `[M]`** — interrupt a running agent, inject a human message, agent resumes with full context
-- **Log tailing `[T]`** — view the last 60 lines of an agent's conversation log
-- **Path tab completion** — completer on project directory prompt
+- **Inline message input** — always-visible input bar at the bottom; type `@agent: message` and press Enter to interrupt and inject a human message; `@all:` broadcasts to all active agents; Tab autocompletes agent IDs
 - **Logs directory** — `workspace/logs/` created alongside other workspace dirs
+- **Keyboard routing** — all keystrokes go through `dashboard.handleInput(key)` which routes to either the input bar or navigation controls depending on context
 
 ```typescript
 import * as path from "node:path";
-import * as readline from "node:readline";
-import * as fsSync from "node:fs";
 import { config } from "./config.js";
 import { runOrchestrator } from "./patterns/orchestrator-workers.js";
 import { runPipeline } from "./patterns/pipeline.js";
@@ -588,6 +600,7 @@ import { checkLimits } from "./safety/limits.js";
 import { promptCheckpoint } from "./safety/checkpoints.js";
 import { DiscordNotifier } from "./notifications/discord.js";
 import { activeAgents } from "./agents/factory.js";
+import { appendStream } from "./comms/shared-fs.js";
 import type { RunMetrics } from "./agents/types.js";
 
 async function main() {
@@ -624,13 +637,10 @@ async function main() {
   await discord.initialize();
   await discord.notifyRunStarted(config);
 
-  const dashboard = createDashboard(config, metrics);
+  const workspacePath = path.resolve(config.workspacePath);
+  const dashboard = createDashboard(config, metrics, workspacePath);
   const globalAbort = new AbortController();
   let shutdownRequested = false;
-  let inputActive = false;
-
-  const workspacePath = path.resolve(config.workspacePath);
-  const agentIds = config.agents.map((a) => a.id);
 
   function handleShutdown() {
     if (shutdownRequested) {
@@ -639,7 +649,7 @@ async function main() {
       process.exit(1);
     }
     shutdownRequested = true;
-    console.log("\nGraceful shutdown... (press again to force quit)");
+    appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] SYS   Graceful shutdown requested...\n`);
     globalAbort.abort();
   }
 
@@ -647,136 +657,43 @@ async function main() {
   process.on("SIGINT", handleShutdown);
   process.on("SIGTERM", handleShutdown);
 
-  // Interactive message sending — interrupt agent and inject human message
-  async function promptMessage() {
-    if (inputActive) return;
-    inputActive = true;
-    dashboard.pauseRender();
-
-    process.stdin.setRawMode(false);
-    process.stdout.write("\x1b[2J\x1b[H");
-    console.log("=== Send Message to Agent ===\n");
-
-    const active = Array.from(activeAgents.values());
-    if (active.length === 0) {
-      console.log("No agents are currently running.");
-      await new Promise((r) => setTimeout(r, 1500));
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      dashboard.resumeRender();
-      inputActive = false;
-      return;
-    }
-
-    console.log("Active agents:");
-    for (const a of active) {
-      console.log(`  ${a.id} (${a.role})`);
-    }
-    console.log(`  all — send to all active agents\n`);
-
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const targetId = await new Promise<string>((resolve) => {
-      rl.question(`Target agent [${active[0].id}]: `, resolve);
-    });
-    const message = await new Promise<string>((resolve) => {
-      rl.question("Message (empty to cancel): ", resolve);
-    });
-    rl.close();
-
-    if (message.trim()) {
-      const target = targetId.trim() || active[0].id;
-      if (target === "all") {
-        for (const a of active) {
-          await a.sendMessage(message.trim());
-          console.log(`  → interrupted & queued message for ${a.id}`);
-        }
-      } else {
-        const agent = activeAgents.get(target);
-        if (agent) {
-          await agent.sendMessage(message.trim());
-          console.log(`\n→ Interrupted ${target}, message will be injected on resume.`);
-        } else {
-          console.log(`\nAgent "${target}" is not currently running.`);
-        }
+  // Send message from input bar to target agent(s)
+  async function sendInputMessage(target: string, message: string): Promise<void> {
+    if (target === "all") {
+      for (const a of activeAgents.values()) {
+        await a.sendMessage(message);
       }
+      appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] HMSG  human -> all: ${message.slice(0, 120)}\n`);
     } else {
-      console.log("\nCancelled.");
+      const agent = activeAgents.get(target);
+      if (agent) {
+        await agent.sendMessage(message);
+        appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] HMSG  human -> ${target}: ${message.slice(0, 120)}\n`);
+      }
     }
-
-    await new Promise((r) => setTimeout(r, 1000));
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    dashboard.resumeRender();
-    inputActive = false;
   }
 
-  // Tail an agent's log file
-  async function tailAgentLog() {
-    if (inputActive) return;
-    inputActive = true;
-    dashboard.pauseRender();
-
-    process.stdin.setRawMode(false);
-    process.stdout.write("\x1b[2J\x1b[H");
-    console.log("=== Tail Agent Log ===\n");
-    console.log("Available agents:", agentIds.join(", "));
-
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const agentId = await new Promise<string>((resolve) => {
-      rl.question(`\nAgent ID [${agentIds[0]}]: `, resolve);
-    });
-    rl.close();
-
-    const selectedId = agentId.trim() || agentIds[0];
-    const logFile = path.join(workspacePath, "logs", `${selectedId}.log`);
-
-    process.stdout.write("\x1b[2J\x1b[H");
-    console.log(`=== Log: ${selectedId} (press any key to return) ===\n`);
-
-    try {
-      const content = fsSync.readFileSync(logFile, "utf-8");
-      const lines = content.split("\n");
-      console.log(lines.slice(-60).join("\n"));
-    } catch {
-      console.log("(No log file yet — agent may not have started)");
-    }
-
-    console.log("\n--- Press any key to return to dashboard ---");
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-
-    await new Promise<void>((resolve) => {
-      const handler = () => {
-        process.stdin.removeListener("data", handler);
-        resolve();
-      };
-      process.stdin.on("data", handler);
-    });
-
-    dashboard.resumeRender();
-    inputActive = false;
-  }
-
-  // Handle keyboard input for dashboard controls
+  // All keyboard input goes through the dashboard's handleInput method
+  // The dashboard manages routing between input bar, scrolling, and control keys
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on("data", (key) => {
-      if (inputActive) return;
-      const char = key.toString().toLowerCase();
-      if (char === "s" || char === "\u0003") {
+      const bytes = key as Buffer;
+
+      // Ctrl+C always triggers shutdown regardless of input state
+      if (bytes[0] === 0x03) {
         handleShutdown();
-      } else if (char === "d") {
-        dashboard.toggleDetailView();
-      } else if (char === "p") {
-        dashboard.togglePause();
-      } else if (char === "l") {
-        dashboard.showLogs();
-      } else if (char === "m") {
-        promptMessage();
-      } else if (char === "t") {
-        tailAgentLog();
+        return;
       }
+
+      // Route all input through dashboard — it decides what to do based on current view and input bar state
+      dashboard.handleInput(bytes, {
+        onShutdown: handleShutdown,
+        onSendMessage: sendInputMessage,
+        getActiveAgentIds: () => [...activeAgents.keys()],
+        getAllAgentIds: () => config.agents.map((a) => a.id),
+      });
     });
   }
 
@@ -836,6 +753,7 @@ function generateSummary(metrics: RunMetrics): string {
   lines.push("", "## Workspace Contents", "");
   lines.push("Check `workspace/results/` for detailed outputs from each agent.");
   lines.push("Check `workspace/logs/` for full agent conversation transcripts.");
+  lines.push("Check `workspace/logs/_stream.log` for the unified activity stream.");
 
   return lines.join("\n");
 }
@@ -889,7 +807,7 @@ Judge prompt:
 Each pattern function must:
 - Accept `(config, metrics, abortController, dashboard, discord)` arguments
 - Compute `const logDir = path.join(config.workspacePath, "logs")` at the top
-- Pass `logDir` as the last argument to every `runAgent()` call (after `onMessage`)
+- Pass `logDir` and `config.workspacePath` as the last two arguments to every `runAgent()` call (after `onMessage`) — both are needed for per-agent logs and the unified stream
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
 - Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
@@ -1042,10 +960,27 @@ Workspace read/write utilities:
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+function ts(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+// Unified stream log — all agents + inter-agent comms in one chronological file
+export async function appendStream(workspacePath: string, line: string): Promise<void> {
+  try {
+    const streamFile = path.join(workspacePath, "logs", "_stream.log");
+    await fs.appendFile(streamFile, line);
+  } catch {
+    // Best-effort logging
+  }
+}
+
 export async function writeTask(workspacePath: string, agentId: string, iteration: number, content: string): Promise<string> {
   const filePath = path.join(workspacePath, "tasks", `${agentId}-task-${iteration}.json`);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, content, "utf-8");
+  const preview = content.slice(0, 120).replace(/\n/g, " ");
+  appendStream(workspacePath, `[${ts()}] TASK  ${agentId} <- task-${iteration}: ${preview}\n`);
   return filePath;
 }
 
@@ -1053,6 +988,8 @@ export async function writeResult(workspacePath: string, agentId: string, iterat
   const filePath = path.join(workspacePath, "results", `${agentId}-result-${iteration}.md`);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, content, "utf-8");
+  const preview = content.slice(0, 120).replace(/\n/g, " ");
+  appendStream(workspacePath, `[${ts()}] DONE  ${agentId} -> result-${iteration}: ${preview}\n`);
   return filePath;
 }
 
@@ -1075,6 +1012,8 @@ export async function writeMessage(workspacePath: string, from: string, to: stri
   const filePath = path.join(workspacePath, "messages", `${from}-to-${to}-${Date.now()}.json`);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify({ from, to, content, timestamp: new Date().toISOString() }), "utf-8");
+  const preview = content.slice(0, 120).replace(/\n/g, " ");
+  appendStream(workspacePath, `[${ts()}] MSG   ${from} -> ${to}: ${preview}\n`);
 }
 
 export async function checkDone(workspacePath: string): Promise<boolean> {
@@ -1362,21 +1301,125 @@ export class DiscordNotifier {
 
 ### Generate `src/dashboard/terminal-ui.ts`
 
-Generate a terminal UI that:
-- Renders an overview table (all agents, status, turns, estimated cost, last activity) using ANSI escape codes for formatting
-- Supports keyboard controls: `P` (pause/resume), `S` (stop, 2x = force), `D` (toggle detail view), `L` (show logs), `M` (message agent), `T` (tail agent log)
-- In detail view: shows streaming output for the selected agent, arrow keys to switch agents
-- Updates in-place using `\x1b[2J\x1b[H` (clear screen) on a 500ms interval
-- Has a `update()` method called by the pattern runner after each status change
-- Has a `stop()` method for graceful cleanup
-- Has a `pauseRender()` method to stop the render interval (used by [M] and [T] handlers)
-- Has a `resumeRender()` method to restart the render interval after input is done
-- Shows the task name, pattern, elapsed time, iteration count, and total estimated cost in a header bar
-- Uses box-drawing characters (╔═╗║╚╝) for borders
-- Uses emoji for status: ✅ done, 🔄 working, ⏳ waiting, ❌ error, ⏸ paused
-- Footer shows: `[P] pause  [S] stop (2x=force)  [D] detail  [L] logs  [M] msg  [T] tail`
+Generate a terminal UI with a **stream-first design**. The default view is the live activity stream (not the agent table). The layout has three sections: header, stream body, and input bar.
 
-Keep the dashboard implementation simple — use raw ANSI codes and `process.stdout.write`, no external TUI library needed. This keeps dependencies minimal.
+**Layout:**
+```
+╔══════════════════════════════════════════════════════════╗
+║  🏭 PROJECT TITLE                                       ║
+║  orchestrator-workers | 4 agents | ⏱ 3m 21s | ~€1.23   ║
+╠══════════════════════════════════════════════════════════╣
+║ [14:23:01] START orchestrator (coordinator) — sonnet    ║
+║ [14:23:02] START researcher (research) — haiku          ║
+║ [14:23:05] THINK orchestrator: Analyzing the task...    ║
+║ [14:23:06] TOOL  researcher -> Read                     ║
+║ [14:23:08] MSG   orchestrator -> researcher: Please...  ║
+║ [14:23:10] TASK  worker-1 <- task-1: Implement the...   ║
+║ [14:23:15] DONE  researcher -> result-1: Found 12...    ║
+║ [14:23:18] THINK worker-1: Working on the implement...  ║
+║                                                          ║
+╠══════════════════════════════════════════════════════════╣
+║ > @orchestrator: _                                       ║
+╚══════════════════════════════════════════════════════════╝
+ [Tab] agents  [↑↓] scroll  [P] pause  [S] stop  [D] detail
+```
+
+**Header section:**
+- Project name displayed prominently (large text or bold ANSI)
+- Status bar: pattern name, agent count, elapsed time, total estimated cost
+
+**Stream body (default view):**
+- Reads `workspace/logs/_stream.log` and renders as a live-updating chronological feed
+- Auto-follow mode by default (shows latest entries at the bottom)
+- Arrow up/down scrolls through history; scrolling up pauses auto-follow
+- Scrolling back to the bottom (or pressing `End`) resumes auto-follow
+- Event types are 5-char fixed-width labels for clean alignment:
+  - `START` — agent started (yellow)
+  - `END  ` — agent finished (green)
+  - `ERROR` — agent error (red)
+  - `THINK` — agent reasoning, truncated to fit terminal width (dim/gray)
+  - `TOOL ` — agent tool call (dim/gray)
+  - `HMSG ` — human message injected (bright cyan)
+  - `MSG  ` — inter-agent message, from -> to (cyan, bold)
+  - `TASK ` — task assignment (yellow)
+  - `DONE ` — result submitted (green, bold)
+- Inter-agent messages (`MSG`, `TASK`, `DONE`) are visually prominent — they show the communication flow between agents
+
+**Input bar (always visible at the bottom):**
+- A persistent message input field: `> @{agent}: {message}_`
+- Type `@` then Tab to cycle through available agent IDs (autocomplete)
+- Type `@all` to broadcast to all active agents
+- Press Enter to send the message (interrupts the target agent, injects human message)
+- Press Escape to clear the input
+- When the input bar is empty, the arrow keys control stream scrolling
+- When typing, the input captures keystrokes (standard text editing: backspace, left/right arrows)
+
+**Agent detail view (toggle with `D`):**
+- Replaces the stream body with a single-agent detail view
+- Shows streaming output from one agent
+- Arrow keys switch between agents
+- Agent selector at top: `< orchestrator | researcher | worker-1 >` with arrows to navigate
+
+**Agent table view (toggle with `T`):**
+- Shows the overview table with all agents, status, turns, estimated cost, last activity
+- Quick status check, then press `T` again to return to stream
+
+**Inline selection (for any agent picker prompts):**
+- When a selection is needed (e.g., picking an agent), show an inline selector:
+  - Arrow up/down to highlight an option
+  - Type to filter/search (fuzzy match on agent ID and role)
+  - Tab to autocomplete the first match
+  - Enter to confirm selection
+- This replaces the old readline-based prompt
+
+**Methods:**
+- `update()` — called by pattern runner after each status change
+- `stop()` — graceful cleanup of intervals and raw mode
+- `pauseRender()` / `resumeRender()` — pause/resume the render interval
+- `toggleDetailView()` — switch between stream and detail views
+- `toggleTableView()` — switch between stream and agent table
+- `streamScrollUp()` / `streamScrollDown()` — scroll the stream feed
+- `handleInput(key: Buffer, callbacks)` — route keystrokes to input bar, navigation, or control shortcuts (callbacks provide `onShutdown`, `onSendMessage`, `getActiveAgentIds`, `getAllAgentIds`)
+
+**Footer (context-sensitive):**
+- Stream view: `[Tab] agents  [↑↓] scroll  [P] pause  [S] stop  [D] detail  [T] table`
+- Detail view: `[←→] switch agent  [D] back  [P] pause  [S] stop`
+- Table view: `[T] back to stream  [P] pause  [S] stop`
+
+**Implementation notes:**
+- Use raw ANSI codes and `process.stdout.write` — no external TUI library
+- Updates in-place using `\x1b[2J\x1b[H` (clear screen) on a 500ms interval
+- Uses box-drawing characters (╔═╗║╚╝) for borders
+- Uses ANSI colors: `\x1b[1m` bold, `\x1b[2m` dim, `\x1b[31m` red, `\x1b[32m` green, `\x1b[33m` yellow, `\x1b[36m` cyan, `\x1b[0m` reset
+- Get terminal width/height from `process.stdout.columns` and `process.stdout.rows`
+- Truncate lines to terminal width to prevent wrapping artifacts
+- Emoji for status: ✅ done, 🔄 working, ⏳ waiting, ❌ error, ⏸ paused
+
+**Exported function signature:**
+```typescript
+export function createDashboard(
+  config: ProjectConfig,
+  metrics: RunMetrics,
+  workspacePath: string,  // needed to read workspace/logs/_stream.log
+): Dashboard;
+```
+
+**`handleInput` callback interface:**
+```typescript
+dashboard.handleInput(key: Buffer, callbacks: {
+  onShutdown: () => void;
+  onSendMessage: (target: string, message: string) => Promise<void>;
+  getActiveAgentIds: () => string[];
+  getAllAgentIds: () => string[];
+});
+```
+
+The dashboard manages all input routing internally:
+- When the input bar has focus (user is typing), keystrokes go to the input buffer
+- When the input bar is empty, single-key shortcuts (`D`, `T`, `P`, `S`) trigger view/control actions
+- Arrow keys go to stream scrolling when input bar is empty, or cursor movement when typing
+- Tab triggers agent ID autocomplete using the `getAllAgentIds` callback
+- Enter parses `@target: message` from the input buffer and calls `onSendMessage`
 
 ### Generate `README.md`
 
@@ -1408,18 +1451,27 @@ npm install
 npx tsx src/run.ts
 \```
 
-## Dashboard Controls
+## Dashboard
+
+The dashboard shows a **live activity stream** by default — all agent events in chronological order with inter-agent communication highlighted. A message input bar is always visible at the bottom.
+
+### Controls
 
 | Key | Action |
 |-----|--------|
-| `D` | Toggle detail view (see agent live output) |
+| `↑` `↓` | Scroll stream feed up/down |
+| `D` | Toggle detail view (single agent live output) |
+| `T` | Toggle table view (agent status overview) |
 | `P` | Pause / resume |
 | `S` | Graceful stop (press twice to force quit) |
-| `L` | Show logs |
-| `M` | Send message to a running agent (interrupt + inject) |
-| `T` | Tail an agent's conversation log |
-| `←` `→` | Switch agent (detail view) |
+| `Tab` | Autocomplete agent ID in message input |
+| `Enter` | Send message from input bar |
+| `Esc` | Clear input bar |
 | `Ctrl+C` | Same as S (graceful stop, twice to force) |
+
+### Messaging
+
+Type directly in the input bar at the bottom: `@agent-id: your message` then Enter. Use `@all:` to broadcast. Tab autocompletes agent IDs.
 
 ## Stop Conditions
 
@@ -1439,13 +1491,19 @@ npx tsx src/run.ts
 src/
 ├── run.ts             — Entry point
 ├── config.ts          — Agent and limit configuration
-├── orchestrator.ts    — Main coordination loop
 ├── agents/            — Agent types and SDK factory
 ├── patterns/          — Collaboration pattern implementations
 ├── safety/            — Limits, checkpoints, sandboxing
-├── comms/             — Shared workspace utilities
-└── dashboard/         — Terminal UI
-workspace/             — Agent communication (tasks, results, messages)
+├── comms/             — Shared workspace utilities + unified stream
+├── dashboard/         — Terminal UI (stream-first with input bar)
+└── notifications/     — Discord integration
+workspace/
+├── tasks/             — Task assignments
+├── results/           — Agent outputs
+├── messages/          — Inter-agent messages
+└── logs/
+    ├── _stream.log    — Unified activity stream (all agents)
+    └── {agent}.log    — Per-agent conversation transcripts
 \```
 
 ## Cost Note
@@ -1475,13 +1533,14 @@ A multi-agent collaboration project generated by `/agent-factory`. {agent-count}
 - `src/config.ts` — All agent definitions and stop conditions. Edit this to customize.
 - `src/run.ts` — Entry point. Run with `npx tsx src/run.ts`.
 - `src/patterns/{pattern}.ts` — The collaboration logic.
-- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs, `workspace/logs/` for conversation transcripts.
+- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs, `workspace/logs/` for transcripts, `workspace/logs/_stream.log` for the unified activity stream.
 
-## Interactive Controls
+## Dashboard & Controls
 
-- Press `[M]` to send a message to a running agent — interrupts it and resumes with your message injected
-- Press `[T]` to tail an agent's conversation log in real-time
-- Press `[S]` twice to force quit if an agent is stuck
+- The dashboard shows a **live activity stream** by default with all agent events chronologically
+- Type `@agent-id: message` in the input bar at the bottom and press Enter to message agents
+- Use Tab to autocomplete agent IDs, `@all:` to broadcast
+- `↑↓` scroll the stream, `D` for detail view, `T` for table view, `P` pause, `S` stop (2x = force)
 
 ## Running
 
