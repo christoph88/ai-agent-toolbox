@@ -232,7 +232,7 @@ Generate all project files directly in the current working directory (CWD) — d
 
 ```bash
 mkdir -p src/{agents,patterns,safety,comms,dashboard,notifications}
-mkdir -p workspace/{tasks,results,messages}
+mkdir -p workspace/{tasks,results,messages,logs}
 ```
 
 ### Generate `package.json`
@@ -395,10 +395,39 @@ export const USD_TO_EUR = 0.92;
 
 ### Generate `src/agents/factory.ts`
 
+This file includes:
+- **Agent message logging** — writes timestamped conversations to `{logDir}/{agentId}.log`
+- **Active agent registry** — tracks running agents so the `[M]` key can send messages to them
+- **Interrupt + resume** — when a human sends a message, the agent's query is interrupted and resumed with the message injected into the conversation
+
 ```typescript
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { AgentConfig, AgentStatus } from "./types.js";
 import { USD_TO_EUR } from "../config.js";
+
+function timestamp(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+async function appendLog(logFile: string, text: string): Promise<void> {
+  try {
+    await fs.appendFile(logFile, text);
+  } catch {
+    // Ignore log write failures
+  }
+}
+
+// Registry of currently running agents — used by [M] key to send messages
+export interface ActiveAgent {
+  readonly id: string;
+  readonly role: string;
+  sendMessage(text: string): Promise<void>;
+}
+export const activeAgents = new Map<string, ActiveAgent>();
 
 export async function runAgent(
   agent: AgentConfig,
@@ -406,6 +435,7 @@ export async function runAgent(
   cwd: string,
   abortController: AbortController,
   onMessage?: (message: any) => void,
+  logDir?: string,
 ): Promise<{ status: AgentStatus; result: string }> {
   const status: AgentStatus = {
     id: agent.id,
@@ -417,53 +447,118 @@ export async function runAgent(
   };
 
   let resultText = "";
+  const logFile = logDir ? path.join(logDir, `${agent.id}.log`) : null;
+  const sessionId = crypto.randomUUID();
+  let pendingMessage: string | null = null;
+  let currentQuery: ReturnType<typeof query> | null = null;
+
+  // Register in active agents registry
+  activeAgents.set(agent.id, {
+    id: agent.id,
+    role: agent.role,
+    async sendMessage(text: string) {
+      pendingMessage = text;
+      if (currentQuery) {
+        try { await currentQuery.interrupt(); } catch {}
+      }
+    },
+  });
 
   try {
-    const q = query({
-      prompt,
-      options: {
-        systemPrompt: agent.systemPrompt,
-        allowedTools: agent.allowedTools,
-        disallowedTools: agent.disallowedTools,
-        sandbox: agent.sandbox,
-        model: agent.model,
-        maxTurns: agent.maxTurns,
-        cwd,
-        abortController,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-      },
-    });
+    let currentPrompt = prompt;
+    let isResume = false;
 
-    for await (const message of q) {
-      onMessage?.(message);
+    while (!abortController.signal.aborted) {
+      currentQuery = query({
+        prompt: currentPrompt,
+        options: {
+          systemPrompt: agent.systemPrompt,
+          allowedTools: agent.allowedTools,
+          disallowedTools: agent.disallowedTools,
+          sandbox: agent.sandbox,
+          model: agent.model,
+          maxTurns: agent.maxTurns,
+          cwd,
+          abortController,
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          ...(isResume ? { resume: sessionId } : { sessionId }),
+        },
+      });
 
-      if (message.type === "assistant") {
-        const content = message.message.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if ("text" in block) {
-              status.lastActivity = block.text.slice(0, 100);
+      if (logFile && isResume) {
+        appendLog(logFile, `[${timestamp()}] === HUMAN MESSAGE ===\n${currentPrompt}\n\n`);
+      }
+
+      for await (const message of currentQuery) {
+        onMessage?.(message);
+
+        if (message.type === "assistant") {
+          const content = message.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if ("text" in block) {
+                status.lastActivity = block.text.slice(0, 100);
+                if (logFile) {
+                  appendLog(logFile, `[${timestamp()}] === ASSISTANT (turn ${status.turns + 1}) ===\n${block.text}\n\n`);
+                }
+              }
+              if ("type" in block && block.type === "tool_use") {
+                if (logFile) {
+                  const input = JSON.stringify(block.input).slice(0, 500);
+                  appendLog(logFile, `[${timestamp()}] === TOOL CALL: ${block.name} ===\n${input}\n\n`);
+                }
+              }
+              if ("type" in block && block.type === "tool_result") {
+                if (logFile) {
+                  const output = typeof block.content === "string"
+                    ? block.content.slice(0, 300)
+                    : JSON.stringify(block.content).slice(0, 300);
+                  appendLog(logFile, `[${timestamp()}] === TOOL RESULT ===\n${output}\n\n`);
+                }
+              }
+            }
+          }
+          status.turns++;
+        }
+
+        if (message.type === "result") {
+          if (message.subtype === "success") {
+            resultText = message.result ?? "";
+            status.estimatedCostEur = (message.total_cost_usd ?? 0) * USD_TO_EUR;
+            status.sessionId = message.session_id;
+            status.state = "done";
+            if (logFile) {
+              appendLog(logFile, `[${timestamp()}] === RESULT: success | Cost: $${(message.total_cost_usd ?? 0).toFixed(2)} | Session: ${message.session_id ?? "n/a"} ===\n\n`);
+            }
+          } else {
+            status.state = "error";
+            resultText = `Error: ${message.subtype}`;
+            if (logFile) {
+              appendLog(logFile, `[${timestamp()}] === RESULT: ${message.subtype} ===\n\n`);
             }
           }
         }
-        status.turns++;
       }
 
-      if (message.type === "result") {
-        if (message.subtype === "success") {
-          resultText = message.result ?? "";
-          status.estimatedCostEur = (message.total_cost_usd ?? 0) * USD_TO_EUR;
-          status.state = "done";
-        } else {
-          status.state = "error";
-          resultText = `Error: ${message.subtype}`;
-        }
+      // After query ends, check for pending human message
+      if (pendingMessage && !abortController.signal.aborted) {
+        currentPrompt = pendingMessage;
+        pendingMessage = null;
+        isResume = true;
+        status.state = "working";
+        status.lastActivity = "Processing human message...";
+        continue;
       }
+
+      break; // Normal completion
     }
   } catch (err) {
     status.state = "error";
     status.lastActivity = `Error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    activeAgents.delete(agent.id);
+    currentQuery = null;
   }
 
   return { status, result: resultText };
@@ -472,9 +567,18 @@ export async function runAgent(
 
 ### Generate `src/run.ts`
 
-This is the CLI entry point. It loads config, runs the chosen pattern, and displays the dashboard.
+This is the CLI entry point. It loads config, runs the chosen pattern, and displays the dashboard. It includes:
+- **Force quit** — double-press S or Ctrl+C for immediate exit
+- **SIGTERM handler** — graceful shutdown on SIGTERM
+- **Interactive messaging `[M]`** — interrupt a running agent, inject a human message, agent resumes with full context
+- **Log tailing `[T]`** — view the last 60 lines of an agent's conversation log
+- **Path tab completion** — completer on project directory prompt
+- **Logs directory** — `workspace/logs/` created alongside other workspace dirs
 
 ```typescript
+import * as path from "node:path";
+import * as readline from "node:readline";
+import * as fsSync from "node:fs";
 import { config } from "./config.js";
 import { runOrchestrator } from "./patterns/orchestrator-workers.js";
 import { runPipeline } from "./patterns/pipeline.js";
@@ -483,6 +587,7 @@ import { createDashboard } from "./dashboard/terminal-ui.js";
 import { checkLimits } from "./safety/limits.js";
 import { promptCheckpoint } from "./safety/checkpoints.js";
 import { DiscordNotifier } from "./notifications/discord.js";
+import { activeAgents } from "./agents/factory.js";
 import type { RunMetrics } from "./agents/types.js";
 
 async function main() {
@@ -508,6 +613,12 @@ async function main() {
     });
   }
 
+  // Create workspace dirs (including logs)
+  const fsAsync = await import("node:fs/promises");
+  for (const dir of ["tasks", "results", "messages", ".state", "logs"]) {
+    await fsAsync.mkdir(path.join(config.workspacePath, dir), { recursive: true });
+  }
+
   // Initialize Discord notifications
   const discord = new DiscordNotifier(config.discord, config.name);
   await discord.initialize();
@@ -515,27 +626,156 @@ async function main() {
 
   const dashboard = createDashboard(config, metrics);
   const globalAbort = new AbortController();
+  let shutdownRequested = false;
+  let inputActive = false;
 
-  // Handle Ctrl+C gracefully
-  process.on("SIGINT", () => {
-    console.log("\n\n⏹  Graceful shutdown requested...");
+  const workspacePath = path.resolve(config.workspacePath);
+  const agentIds = config.agents.map((a) => a.id);
+
+  function handleShutdown() {
+    if (shutdownRequested) {
+      dashboard.stop();
+      console.log("\nForce quit!");
+      process.exit(1);
+    }
+    shutdownRequested = true;
+    console.log("\nGraceful shutdown... (press again to force quit)");
     globalAbort.abort();
-  });
+  }
+
+  // Handle Ctrl+C and SIGTERM
+  process.on("SIGINT", handleShutdown);
+  process.on("SIGTERM", handleShutdown);
+
+  // Interactive message sending — interrupt agent and inject human message
+  async function promptMessage() {
+    if (inputActive) return;
+    inputActive = true;
+    dashboard.pauseRender();
+
+    process.stdin.setRawMode(false);
+    process.stdout.write("\x1b[2J\x1b[H");
+    console.log("=== Send Message to Agent ===\n");
+
+    const active = Array.from(activeAgents.values());
+    if (active.length === 0) {
+      console.log("No agents are currently running.");
+      await new Promise((r) => setTimeout(r, 1500));
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      dashboard.resumeRender();
+      inputActive = false;
+      return;
+    }
+
+    console.log("Active agents:");
+    for (const a of active) {
+      console.log(`  ${a.id} (${a.role})`);
+    }
+    console.log(`  all — send to all active agents\n`);
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const targetId = await new Promise<string>((resolve) => {
+      rl.question(`Target agent [${active[0].id}]: `, resolve);
+    });
+    const message = await new Promise<string>((resolve) => {
+      rl.question("Message (empty to cancel): ", resolve);
+    });
+    rl.close();
+
+    if (message.trim()) {
+      const target = targetId.trim() || active[0].id;
+      if (target === "all") {
+        for (const a of active) {
+          await a.sendMessage(message.trim());
+          console.log(`  → interrupted & queued message for ${a.id}`);
+        }
+      } else {
+        const agent = activeAgents.get(target);
+        if (agent) {
+          await agent.sendMessage(message.trim());
+          console.log(`\n→ Interrupted ${target}, message will be injected on resume.`);
+        } else {
+          console.log(`\nAgent "${target}" is not currently running.`);
+        }
+      }
+    } else {
+      console.log("\nCancelled.");
+    }
+
+    await new Promise((r) => setTimeout(r, 1000));
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    dashboard.resumeRender();
+    inputActive = false;
+  }
+
+  // Tail an agent's log file
+  async function tailAgentLog() {
+    if (inputActive) return;
+    inputActive = true;
+    dashboard.pauseRender();
+
+    process.stdin.setRawMode(false);
+    process.stdout.write("\x1b[2J\x1b[H");
+    console.log("=== Tail Agent Log ===\n");
+    console.log("Available agents:", agentIds.join(", "));
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const agentId = await new Promise<string>((resolve) => {
+      rl.question(`\nAgent ID [${agentIds[0]}]: `, resolve);
+    });
+    rl.close();
+
+    const selectedId = agentId.trim() || agentIds[0];
+    const logFile = path.join(workspacePath, "logs", `${selectedId}.log`);
+
+    process.stdout.write("\x1b[2J\x1b[H");
+    console.log(`=== Log: ${selectedId} (press any key to return) ===\n`);
+
+    try {
+      const content = fsSync.readFileSync(logFile, "utf-8");
+      const lines = content.split("\n");
+      console.log(lines.slice(-60).join("\n"));
+    } catch {
+      console.log("(No log file yet — agent may not have started)");
+    }
+
+    console.log("\n--- Press any key to return to dashboard ---");
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    await new Promise<void>((resolve) => {
+      const handler = () => {
+        process.stdin.removeListener("data", handler);
+        resolve();
+      };
+      process.stdin.on("data", handler);
+    });
+
+    dashboard.resumeRender();
+    inputActive = false;
+  }
 
   // Handle keyboard input for dashboard controls
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on("data", (key) => {
+      if (inputActive) return;
       const char = key.toString().toLowerCase();
-      if (char === "s" || char === "\u0003") { // 's' or Ctrl+C
-        globalAbort.abort();
+      if (char === "s" || char === "\u0003") {
+        handleShutdown();
       } else if (char === "d") {
         dashboard.toggleDetailView();
       } else if (char === "p") {
         dashboard.togglePause();
       } else if (char === "l") {
         dashboard.showLogs();
+      } else if (char === "m") {
+        promptMessage();
+      } else if (char === "t") {
+        tailAgentLog();
       }
     });
   }
@@ -555,8 +795,7 @@ async function main() {
     dashboard.stop();
     // Write final summary
     const summary = generateSummary(metrics);
-    const fs = await import("node:fs/promises");
-    await fs.writeFile(
+    await fsAsync.writeFile(
       `${config.workspacePath}/summary.md`,
       summary,
     );
@@ -596,6 +835,7 @@ function generateSummary(metrics: RunMetrics): string {
 
   lines.push("", "## Workspace Contents", "");
   lines.push("Check `workspace/results/` for detailed outputs from each agent.");
+  lines.push("Check `workspace/logs/` for full agent conversation transcripts.");
 
   return lines.join("\n");
 }
@@ -648,6 +888,8 @@ Judge prompt:
 
 Each pattern function must:
 - Accept `(config, metrics, abortController, dashboard, discord)` arguments
+- Compute `const logDir = path.join(config.workspacePath, "logs")` at the top
+- Pass `logDir` as the last argument to every `runAgent()` call (after `onMessage`)
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
 - Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
@@ -1122,14 +1364,17 @@ export class DiscordNotifier {
 
 Generate a terminal UI that:
 - Renders an overview table (all agents, status, turns, estimated cost, last activity) using ANSI escape codes for formatting
-- Supports keyboard controls: `P` (pause/resume), `S` (stop), `D` (toggle detail view), `L` (show logs)
+- Supports keyboard controls: `P` (pause/resume), `S` (stop, 2x = force), `D` (toggle detail view), `L` (show logs), `M` (message agent), `T` (tail agent log)
 - In detail view: shows streaming output for the selected agent, arrow keys to switch agents
 - Updates in-place using `\x1b[2J\x1b[H` (clear screen) on a 500ms interval
 - Has a `update()` method called by the pattern runner after each status change
 - Has a `stop()` method for graceful cleanup
+- Has a `pauseRender()` method to stop the render interval (used by [M] and [T] handlers)
+- Has a `resumeRender()` method to restart the render interval after input is done
 - Shows the task name, pattern, elapsed time, iteration count, and total estimated cost in a header bar
 - Uses box-drawing characters (╔═╗║╚╝) for borders
 - Uses emoji for status: ✅ done, 🔄 working, ⏳ waiting, ❌ error, ⏸ paused
+- Footer shows: `[P] pause  [S] stop (2x=force)  [D] detail  [L] logs  [M] msg  [T] tail`
 
 Keep the dashboard implementation simple — use raw ANSI codes and `process.stdout.write`, no external TUI library needed. This keeps dependencies minimal.
 
@@ -1169,10 +1414,12 @@ npx tsx src/run.ts
 |-----|--------|
 | `D` | Toggle detail view (see agent live output) |
 | `P` | Pause / resume |
-| `S` | Graceful stop |
+| `S` | Graceful stop (press twice to force quit) |
 | `L` | Show logs |
+| `M` | Send message to a running agent (interrupt + inject) |
+| `T` | Tail an agent's conversation log |
 | `←` `→` | Switch agent (detail view) |
-| `Ctrl+C` | Force stop |
+| `Ctrl+C` | Same as S (graceful stop, twice to force) |
 
 ## Stop Conditions
 
@@ -1228,7 +1475,13 @@ A multi-agent collaboration project generated by `/agent-factory`. {agent-count}
 - `src/config.ts` — All agent definitions and stop conditions. Edit this to customize.
 - `src/run.ts` — Entry point. Run with `npx tsx src/run.ts`.
 - `src/patterns/{pattern}.ts` — The collaboration logic.
-- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs.
+- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs, `workspace/logs/` for conversation transcripts.
+
+## Interactive Controls
+
+- Press `[M]` to send a message to a running agent — interrupts it and resumes with your message injected
+- Press `[T]` to tail an agent's conversation log in real-time
+- Press `[S]` twice to force quit if an agent is stuck
 
 ## Running
 
