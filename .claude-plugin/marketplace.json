@@ -1,6 +1,8 @@
 {
   "name": "ai-agent-toolbox",
-  "description": "Plugin marketplace for AI agent utilities — macOS automation, scheduled tasks, and multi-agent systems.",
+  "metadata": {
+    "description": "AI agent utilities for macOS automation, scheduled tasks, and multi-agent systems."
+  },
   "owner": {
     "name": "christoph88"
   },
