@@ -45,13 +45,18 @@ Designs and generates multi-agent collaboration systems. Describe a task or prob
 **Features:**
 - **Three collaboration patterns:** Orchestrator + Workers (delegation), Pipeline (sequential stages), Debate (parallel proposals + judge)
 - **Per-agent sandboxing** — restrict tools, filesystem access, and network per agent
-- **Real-time terminal dashboard** — see what each agent is doing, estimated cost tracking in EUR
+- **Real-time terminal dashboard** — live activity stream with color-coded events, estimated cost tracking in EUR
 - **Interactive messaging `[M]`** — interrupt a running agent and inject a human message; it resumes with full context
-- **Log tailing `[T]`** — view an agent's conversation transcript live from the dashboard
+- **Agent-to-human questions** — agents can ask the human for help when stuck; answerable via Discord buttons or terminal input; first response wins
+- **Log tailing `[T]`** — view any agent's conversation transcript live, Tab to cycle between agents, `_stream.log` for unified view
+- **Recap view `[R]`** — filtered view of important events only (milestones, questions, errors, decisions — no THINK/TOOL noise)
 - **Agent conversation logging** — full timestamped transcripts saved to `workspace/logs/`
 - **Configurable stop conditions** — max iterations, estimated cost cap, time limit, validation checks, checkpoint prompts
 - **Shared workspace** — agents communicate via a filesystem directory
-- **Discord notifications** — optional webhook integration for run start/completion alerts
+- **Discord integration** — three modes:
+  - **Off** — terminal only
+  - **Status updates** — webhook-based notifications for run start/completion
+  - **Interactive control** — full bot with thread-based conversations, message routing to orchestrator, agent question prompts with buttons, error escalation (Retry/Skip/Stop), confidence review, and post-message reaction summaries
 
 **Generated projects:**
 - Run with `npx tsx src/run.ts`

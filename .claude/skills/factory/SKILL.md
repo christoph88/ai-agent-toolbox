@@ -207,7 +207,7 @@ Ask: "Do you have a Discord bot set up?"
     3. Go to the **Bot** tab → click **Reset Token** → copy the token
     4. Under **Privileged Gateway Intents**, enable **Message Content Intent**
     5. Go to **OAuth2** → **URL Generator** → check the `bot` scope
-    6. In bot permissions, check: **Send Messages**, **Embed Links**, **Read Message History**
+    6. In bot permissions, check: **Send Messages**, **Embed Links**, **Read Message History**, **Add Reactions**, **Create Public Threads**, **Send Messages in Threads**
     7. Copy the generated URL, open it in your browser, invite the bot to your server
     8. In Discord, enable **Developer Mode** (User Settings → App Settings → Advanced)
     9. Right-click the channel you want → **Copy Channel ID**
@@ -232,7 +232,7 @@ Generate all project files directly in the current working directory (CWD) — d
 
 ```bash
 mkdir -p src/{agents,patterns,safety,comms,dashboard,notifications}
-mkdir -p workspace/{tasks,results,messages,logs}
+mkdir -p workspace/{tasks,results,messages,logs,questions}
 ```
 
 ### Generate `package.json`
@@ -341,6 +341,7 @@ export interface RunMetrics {
   startTime: Date;
   totalEstimatedCostEur: number;
   agentStatuses: Map<string, AgentStatus>;
+  currentPipelineStage?: number; // 0-indexed, set by pipeline pattern runner
 }
 ```
 
@@ -392,6 +393,9 @@ export const USD_TO_EUR = 0.92;
 5. For workers: how to pick up tasks and write results
 6. For pipeline agents: which stage directory to read from and write to
 7. For debate agents: where to write proposals
+8. **Asking the human for help:** When you are stuck, uncertain, or need a decision, run the helper script: `bash workspace/ask-human.sh --from "{your-id}" --question "Your question here"`. Optionally add `--options "Option A,Option B"` for multiple-choice. The script writes the question file for you. The human will answer and you'll receive the answer as a `[Human answer]: ...` message. Only ask when genuinely stuck — don't ask for things you can figure out yourself.
+9. **Confidence signals:** When you are uncertain about a decision or output, prefix the relevant workspace file content with `[LOW CONFIDENCE]` on the first line. This flags the output for human review. Use this sparingly — only when you genuinely think a human should validate your work.
+10. For orchestrator/lead agent: When you receive messages prefixed with `[Human via Discord (username)]:` or `[Human answer]:`, treat them as high-priority guidance from the human operator. Acknowledge what you received, explain how it changes your approach, and adapt your strategy accordingly. The username tells you who sent the message. These messages come from the team managing you.
 
 ### Generate `src/agents/factory.ts`
 
@@ -438,6 +442,7 @@ export async function runAgent(
   onMessage?: (message: any) => void,
   logDir?: string,
   workspacePath?: string,
+  onQuestionDetected?: (agentId: string) => void,
 ): Promise<{ status: AgentStatus; result: string }> {
   const status: AgentStatus = {
     id: agent.id,
@@ -520,6 +525,14 @@ export async function runAgent(
                   appendLog(logFile, `[${timestamp()}] === TOOL CALL: ${block.name} ===\n${input}\n\n`);
                 }
                 stream(`[${timestamp()}] TOOL  ${agent.id} -> ${block.name}\n`);
+
+                // Detect question file writes for instant notification
+                if (onQuestionDetected) {
+                  const inputStr = JSON.stringify(block.input);
+                  if (inputStr.includes("workspace/questions/") || inputStr.includes("ask-human.sh")) {
+                    onQuestionDetected(agent.id);
+                  }
+                }
               }
               if ("type" in block && block.type === "tool_result") {
                 if (logFile) {
@@ -591,6 +604,7 @@ This is the CLI entry point. It loads config, runs the chosen pattern, and displ
 
 ```typescript
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
 import { config } from "./config.js";
 import { runOrchestrator } from "./patterns/orchestrator-workers.js";
 import { runPipeline } from "./patterns/pipeline.js";
@@ -599,15 +613,36 @@ import { createDashboard } from "./dashboard/terminal-ui.js";
 import { checkLimits } from "./safety/limits.js";
 import { promptCheckpoint } from "./safety/checkpoints.js";
 import { DiscordNotifier } from "./notifications/discord.js";
+import type { AgentQuestion } from "./notifications/discord.js";
 import { activeAgents } from "./agents/factory.js";
 import { appendStream } from "./comms/shared-fs.js";
 import type { RunMetrics } from "./agents/types.js";
+
+/** Determine which agent should receive human messages based on pattern */
+function getLeadAgentId(): string {
+  if (config.pattern === "orchestrator-workers") {
+    return config.agents[0].id; // orchestrator is always first
+  } else if (config.pattern === "pipeline") {
+    // Use tracked pipeline stage if available, otherwise fall back to first
+    const stage = metrics?.currentPipelineStage;
+    if (stage !== undefined && stage >= 0 && stage < config.agents.length) {
+      return config.agents[stage].id;
+    }
+    return config.agents[0].id;
+  } else {
+    // debate — judge is last agent
+    return config.agents[config.agents.length - 1].id;
+  }
+}
+
+// Module-level reference so getLeadAgentId can access it
+let metrics: RunMetrics;
 
 async function main() {
   console.log(`\n🏭 Agent Factory — "${config.description}"`);
   console.log(`Pattern: ${config.pattern} | Agents: ${config.agents.length}\n`);
 
-  const metrics: RunMetrics = {
+  metrics = {
     iteration: 0,
     startTime: new Date(),
     totalEstimatedCostEur: 0,
@@ -626,18 +661,78 @@ async function main() {
     });
   }
 
-  // Create workspace dirs (including logs)
-  const fsAsync = await import("node:fs/promises");
-  for (const dir of ["tasks", "results", "messages", ".state", "logs"]) {
-    await fsAsync.mkdir(path.join(config.workspacePath, dir), { recursive: true });
+  // Create workspace dirs
+  for (const dir of ["tasks", "results", "messages", ".state", "logs", "questions"]) {
+    await fs.mkdir(path.join(config.workspacePath, dir), { recursive: true });
   }
 
   // Initialize Discord notifications
   const discord = new DiscordNotifier(config.discord, config.name);
   await discord.initialize();
-  await discord.notifyRunStarted(config);
 
   const workspacePath = path.resolve(config.workspacePath);
+
+  // Route Discord messages to the lead agent
+  discord.setMessageHandler(async (text: string, username: string) => {
+    const leadId = getLeadAgentId();
+    const agent = activeAgents.get(leadId);
+    if (agent) {
+      await agent.sendMessage(`[Human via Discord (${username})]: ${text}`);
+      appendStream(workspacePath, `[${ts()}] HMSG  ${username} (discord) -> ${leadId}: ${text.slice(0, 120)}\n`);
+      await discord.notifyHumanMessageDelivered(leadId, text);
+
+      // Watch for agent acknowledgment + reaction summary
+      // Check every 5s for agent activity, cap at 60s
+      const deliveryLineCount = await getStreamLineCount();
+      let ackSent = false;
+      let checks = 0;
+      const ackInterval = setInterval(async () => {
+        checks++;
+        if (checks > 12) { // 60s max
+          clearInterval(ackInterval);
+          return;
+        }
+        try {
+          const streamFile = path.join(workspacePath, "logs", "_stream.log");
+          const content = await fs.readFile(streamFile, "utf-8");
+          const lines = content.split("\n").filter(Boolean);
+          const newLines = lines.slice(deliveryLineCount);
+
+          // Look for the agent's first THINK after our message
+          if (!ackSent) {
+            const agentThink = newLines.find((l) => l.includes(`THINK ${leadId}:`));
+            if (agentThink) {
+              const thinkText = agentThink.replace(/.*THINK \S+: /, "");
+              await discord.notifyAgentAcknowledgment(leadId, thinkText);
+              ackSent = true;
+            }
+          }
+
+          // Once we have activity, wait 5s more for settling, then send summary
+          if (ackSent && checks >= 2) {
+            const importantLines = newLines.filter((l) =>
+              !l.includes("THINK") && !l.includes("TOOL ")
+            );
+            if (importantLines.length > 0 || checks > 6) {
+              await discord.notifyReactionSummary(leadId, newLines.slice(-15));
+              clearInterval(ackInterval);
+            }
+          }
+        } catch {}
+      }, 5_000);
+
+      async function getStreamLineCount(): Promise<number> {
+        try {
+          const streamFile = path.join(workspacePath, "logs", "_stream.log");
+          const content = await fs.readFile(streamFile, "utf-8");
+          return content.split("\n").filter(Boolean).length;
+        } catch { return 0; }
+      }
+    }
+  });
+
+  await discord.notifyRunStarted(config);
+
   const dashboard = createDashboard(config, metrics, workspacePath);
   const globalAbort = new AbortController();
   let shutdownRequested = false;
@@ -649,7 +744,7 @@ async function main() {
       process.exit(1);
     }
     shutdownRequested = true;
-    appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] SYS   Graceful shutdown requested...\n`);
+    appendStream(workspacePath, `[${ts()}] SYS   Graceful shutdown requested...\n`);
     globalAbort.abort();
   }
 
@@ -663,18 +758,122 @@ async function main() {
       for (const a of activeAgents.values()) {
         await a.sendMessage(message);
       }
-      appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] HMSG  human -> all: ${message.slice(0, 120)}\n`);
+      appendStream(workspacePath, `[${ts()}] HMSG  human -> all: ${message.slice(0, 120)}\n`);
     } else {
       const agent = activeAgents.get(target);
       if (agent) {
         await agent.sendMessage(message);
-        appendStream(workspacePath, `[${new Date().toTimeString().slice(0, 8)}] HMSG  human -> ${target}: ${message.slice(0, 120)}\n`);
+        appendStream(workspacePath, `[${ts()}] HMSG  human -> ${target}: ${message.slice(0, 120)}\n`);
       }
     }
   }
 
+  // Answer an agent question from the terminal
+  async function answerQuestion(agentId: string, answer: string): Promise<void> {
+    const agent = activeAgents.get(agentId);
+    if (agent) {
+      await agent.sendMessage(`[Human answer]: ${answer}`);
+      appendStream(workspacePath, `[${ts()}] HMSG  human -> ${agentId} (answer): ${answer.slice(0, 120)}\n`);
+    }
+  }
+
+  // Watch workspace/results/ for [LOW CONFIDENCE] outputs
+  const seenResults = new Set<string>();
+  const confidenceWatcher = setInterval(async () => {
+    if (globalAbort.signal.aborted) return;
+    try {
+      const resultsDir = path.join(workspacePath, "results");
+      const files = await fs.readdir(resultsDir);
+      for (const file of files) {
+        if (seenResults.has(file)) continue;
+        seenResults.add(file);
+        const filePath = path.join(resultsDir, file);
+        const content = await fs.readFile(filePath, "utf-8");
+        if (content.startsWith("[LOW CONFIDENCE]")) {
+          const agentId = file.split("-")[0]; // e.g. "researcher-result-1.md" → "researcher"
+          appendStream(workspacePath, `[${ts()}] WARN  ${agentId} flagged low confidence on ${file}\n`);
+          const response = await discord.promptConfidenceReview(agentId, content.slice(0, 2000));
+          if (response === "review") {
+            // Show in terminal and ask for guidance
+            const guidance = await dashboard.showQuestion({
+              from: agentId,
+              question: `Low confidence output in ${file}. Review and provide guidance:`,
+            });
+            if (guidance) {
+              const agent = activeAgents.get(agentId);
+              if (agent) {
+                await agent.sendMessage(`[Human review]: Your output in ${file} was flagged for review. Guidance: ${guidance}`);
+                appendStream(workspacePath, `[${ts()}] HMSG  human -> ${agentId} (review): ${guidance.slice(0, 120)}\n`);
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+  }, 5000);
+
+  // Watch workspace/questions/ for new question files from agents
+  const questionsDir = path.join(workspacePath, "questions");
+  const seenQuestions = new Set<string>();
+
+  const questionWatcher = setInterval(async () => {
+    if (globalAbort.signal.aborted) return;
+    try {
+      const files = await fs.readdir(questionsDir);
+      for (const file of files) {
+        if (seenQuestions.has(file)) continue;
+        if (!file.endsWith(".json")) continue;
+        seenQuestions.add(file);
+
+        const filePath = path.join(questionsDir, file);
+        const raw = await fs.readFile(filePath, "utf-8");
+        const question: AgentQuestion = JSON.parse(raw);
+        if (question.answered) continue;
+
+        appendStream(workspacePath, `[${ts()}] QUEST ${question.from}: ${question.question.slice(0, 120)}\n`);
+
+        // Race: Discord prompt vs terminal prompt — first answer wins
+        // Use an AbortController so the loser can clean up its listener
+        const raceAbort = new AbortController();
+        const discordPromise = discord.promptQuestion(question, raceAbort.signal);
+        const terminalPromise = dashboard.showQuestion(question, raceAbort.signal);
+
+        const result = await Promise.race([
+          discordPromise.then((a) => ({ answer: a, source: "discord" as const })),
+          terminalPromise.then((a) => ({ answer: a, source: "terminal" as const })),
+        ]);
+
+        // Signal the loser to stop listening
+        raceAbort.abort();
+
+        const finalAnswer = result.answer;
+        const source = result.source;
+
+        if (finalAnswer) {
+          // Update question file
+          question.answered = true;
+          question.answer = finalAnswer;
+          await fs.writeFile(filePath, JSON.stringify(question, null, 2));
+
+          // Inject answer into the asking agent
+          await answerQuestion(question.from, finalAnswer);
+          appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (${source}): ${finalAnswer.slice(0, 120)}\n`);
+        } else {
+          // Both timed out — inject fallback so the agent isn't blocked forever
+          const fallback = "No response received. Proceed with your best judgment.";
+          question.answered = true;
+          question.answer = fallback;
+          await fs.writeFile(filePath, JSON.stringify(question, null, 2));
+          await answerQuestion(question.from, fallback);
+          appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (timeout): ${fallback}\n`);
+        }
+      }
+    } catch {
+      // Best effort — questions dir may not exist yet
+    }
+  }, 2000);
+
   // All keyboard input goes through the dashboard's handleInput method
-  // The dashboard manages routing between input bar, scrolling, and control keys
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
@@ -687,7 +886,7 @@ async function main() {
         return;
       }
 
-      // Route all input through dashboard — it decides what to do based on current view and input bar state
+      // Route all input through dashboard
       dashboard.handleInput(bytes, {
         onShutdown: handleShutdown,
         onSendMessage: sendInputMessage,
@@ -709,10 +908,13 @@ async function main() {
       console.error("\n❌ Unexpected error:", err);
     }
   } finally {
+    clearInterval(questionWatcher);
+    clearInterval(confidenceWatcher);
     dashboard.stop();
+
     // Write final summary
     const summary = generateSummary(metrics);
-    await fsAsync.writeFile(
+    await fs.writeFile(
       `${config.workspacePath}/summary.md`,
       summary,
     );
@@ -724,6 +926,10 @@ async function main() {
 
     process.exit(0);
   }
+}
+
+function ts(): string {
+  return new Date().toTimeString().slice(0, 8);
 }
 
 function generateSummary(metrics: RunMetrics): string {
@@ -790,6 +996,8 @@ Sequential execution:
 Each pipeline agent's prompt:
 > "You are the {role} (stage {n} of {total}). Read your input from workspace/stage-{n-1}/ (or the task description if you're stage 1). Do your work and write your output to workspace/stage-{n}/."
 
+**Pipeline stage tracking:** Before running each stage agent, set `metrics.currentPipelineStage = stageIndex` (0-indexed). This ensures human Discord messages route to the currently active pipeline agent.
+
 ### Generate `src/patterns/debate.ts`
 
 Parallel proposals + judge:
@@ -807,13 +1015,18 @@ Judge prompt:
 Each pattern function must:
 - Accept `(config, metrics, abortController, dashboard, discord)` arguments
 - Compute `const logDir = path.join(config.workspacePath, "logs")` at the top
-- Pass `logDir` and `config.workspacePath` as the last two arguments to every `runAgent()` call (after `onMessage`) — both are needed for per-agent logs and the unified stream
+- Pass `logDir`, `config.workspacePath`, and an `onQuestionDetected` callback as the last three arguments to every `runAgent()` call (after `onMessage`) — both dirs are needed for per-agent logs and the unified stream, and the callback triggers immediate question processing
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
 - Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
 - Update `metrics.agentStatuses` and `metrics.totalEstimatedCostEur` in real-time
 - Call `dashboard.update()` after each status change
 - Call `discord.notifyAgentStatus(status)` when an agent's state changes to working/done/error
+- **Error escalation:** When an agent finishes with `state === "error"`, call `discord.promptErrorEscalation(agentId, errorMessage)`. Based on the response:
+  - `"retry"` → re-run the agent with the same prompt
+  - `"skip"` → continue to the next agent/iteration without this agent's result
+  - `"stop"` → abort the entire run via `abortController.abort()`
+  - `"no-response"` → default behavior (skip for orchestrator workers, stop for pipeline)
 - Call `discord.notifyProgress(metrics)` at the end of each iteration
 
 ### Generate `src/safety/limits.ts`
@@ -1037,6 +1250,8 @@ Always generate this file. The `DiscordNotifier` class gracefully no-ops when `m
 - **Plain text:** Never. Always use embeds for a clean, scannable experience.
 
 ```typescript
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { AgentStatus, RunMetrics, ProjectConfig, DiscordConfig } from "../agents/types.js";
 
 function statusEmoji(state: string): string {
@@ -1063,15 +1278,30 @@ async function sendWebhook(content: object): Promise<void> {
   }
 }
 
+export interface AgentQuestion {
+  from: string;
+  question: string;
+  options?: string[];
+  answered?: boolean;
+  answer?: string;
+}
+
 export class DiscordNotifier {
   private config: DiscordConfig;
   private projectName: string;
   private bot: any = null;
   private channel: any = null;
+  private thread: any = null;
+  private messageHandler: ((text: string, username: string) => void) | null = null;
 
   constructor(config: DiscordConfig, projectName: string) {
     this.config = config;
     this.projectName = projectName;
+  }
+
+  /** Register a handler for incoming Discord messages → orchestrator. Receives (text, username). */
+  setMessageHandler(handler: (text: string, username: string) => void): void {
+    this.messageHandler = handler;
   }
 
   async initialize(): Promise<void> {
@@ -1081,7 +1311,11 @@ export class DiscordNotifier {
       try {
         const { Client, GatewayIntentBits } = await import("discord.js");
         this.bot = new Client({
-          intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+          intents: [
+            GatewayIntentBits.Guilds,
+            GatewayIntentBits.GuildMessages,
+            GatewayIntentBits.MessageContent,
+          ],
         });
 
         const token = process.env.DISCORD_BOT_TOKEN;
@@ -1094,7 +1328,39 @@ export class DiscordNotifier {
 
         await this.bot.login(token);
         this.channel = await this.bot.channels.fetch(channelId);
-        console.log("✅ Discord bot connected");
+
+        // Create a thread for this run — keeps the main channel clean
+        const threadName = `🏭 ${this.projectName} — ${new Date().toLocaleString()}`;
+        this.thread = await this.channel.threads.create({
+          name: threadName.slice(0, 100),
+          autoArchiveDuration: 1440, // 24 hours
+          reason: "Agent Factory run",
+        });
+
+        // Post thread link in main channel
+        await this.channel.send({
+          embeds: [{
+            title: "🏭 Agent run started",
+            description: `Follow along in the thread: ${this.thread}`,
+            color: 0x3498db,
+          }],
+        });
+
+        // Listen for messages in the thread
+        this.bot.on("messageCreate", (msg: any) => {
+          if (msg.author.bot) return;
+          // Only listen in our thread
+          if (this.thread && msg.channel.id !== this.thread.id) return;
+          // React to confirm receipt
+          msg.react("👂").catch(() => {});
+          // Route to handler with username for attribution
+          if (this.messageHandler) {
+            const username = msg.author.displayName || msg.author.username;
+            this.messageHandler(msg.content, username);
+          }
+        });
+
+        console.log(`✅ Discord bot connected — thread: ${threadName}`);
       } catch (err) {
         console.warn("⚠️  Discord bot connection failed — falling back to terminal:", err);
         this.config.mode = "off";
@@ -1107,6 +1373,19 @@ export class DiscordNotifier {
     }
   }
 
+  /** Send to the thread (interactive mode) or channel (updates mode) */
+  private async send(content: object): Promise<any> {
+    if (this.config.mode === "updates") {
+      await sendWebhook(content);
+      return null;
+    }
+    const target = this.thread ?? this.channel;
+    if (target) {
+      return target.send(content);
+    }
+    return null;
+  }
+
   async notifyRunStarted(projectConfig: ProjectConfig): Promise<void> {
     if (this.config.mode === "off") return;
 
@@ -1114,48 +1393,64 @@ export class DiscordNotifier {
       .map((a) => `\`${a.id}\` — ${a.role} (${a.model})`)
       .join("\n");
 
-    const embed = {
-      title: "🏭 Agent Run Started",
-      description: `**${projectConfig.description}**`,
-      color: 0x3498db,
-      fields: [
-        { name: "Pattern", value: projectConfig.pattern, inline: true },
-        { name: "Agents", value: String(projectConfig.agents.length), inline: true },
-        { name: "\u200b", value: "\u200b", inline: true }, // spacer
-        { name: "Team", value: agentList },
-      ],
-      timestamp: new Date().toISOString(),
-    };
-
-    if (this.config.mode === "updates") {
-      await sendWebhook({ embeds: [embed] });
-    } else if (this.channel) {
-      await this.channel.send({ embeds: [embed] });
-    }
+    await this.send({
+      embeds: [{
+        title: "🏭 Agent Run Started",
+        description: `**${projectConfig.description}**`,
+        color: 0x3498db,
+        fields: [
+          { name: "Pattern", value: projectConfig.pattern, inline: true },
+          { name: "Agents", value: String(projectConfig.agents.length), inline: true },
+          { name: "\u200b", value: "\u200b", inline: true },
+          { name: "Team", value: agentList },
+        ],
+        timestamp: new Date().toISOString(),
+      }],
+    });
   }
 
   async notifyAgentStatus(status: AgentStatus): Promise<void> {
     if (this.config.mode === "off") return;
-    // Only notify on meaningful transitions
     if (!["working", "done", "error"].includes(status.state)) return;
 
-    const embed = {
-      title: `${statusEmoji(status.state)} ${status.id}`,
-      description: status.lastActivity.slice(0, 200),
-      color: statusColor(status.state),
-      fields: [
-        { name: "Role", value: status.role, inline: true },
-        { name: "Turns", value: String(status.turns), inline: true },
-        { name: "Cost", value: `~€${status.estimatedCostEur.toFixed(2)}`, inline: true },
-      ],
-      footer: { text: this.projectName },
-    };
+    await this.send({
+      embeds: [{
+        title: `${statusEmoji(status.state)} ${status.id}`,
+        description: status.lastActivity.slice(0, 200),
+        color: statusColor(status.state),
+        fields: [
+          { name: "Role", value: status.role, inline: true },
+          { name: "Turns", value: String(status.turns), inline: true },
+          { name: "Cost", value: `~€${status.estimatedCostEur.toFixed(2)}`, inline: true },
+        ],
+        footer: { text: this.projectName },
+      }],
+    });
+  }
 
-    if (this.config.mode === "updates") {
-      await sendWebhook({ embeds: [embed] });
-    } else if (this.channel) {
-      await this.channel.send({ embeds: [embed] });
-    }
+  /** Confirmation embed when a human Discord message is delivered to an agent */
+  async notifyHumanMessageDelivered(agentId: string, text: string): Promise<void> {
+    if (this.config.mode !== "interactive") return;
+    await this.send({
+      embeds: [{
+        title: "💬 Message delivered",
+        description: `Your message was sent to **${agentId}**:\n> ${text.slice(0, 200)}`,
+        color: 0x3498db,
+        footer: { text: "The agent will process this on its next turn" },
+      }],
+    });
+  }
+
+  /** Echo back what the agent said after receiving a human message */
+  async notifyAgentAcknowledgment(agentId: string, response: string): Promise<void> {
+    if (this.config.mode !== "interactive") return;
+    await this.send({
+      embeds: [{
+        title: `💭 ${agentId} responded`,
+        description: response.slice(0, 2000),
+        color: 0x2ecc71,
+      }],
+    });
   }
 
   async notifyProgress(metrics: RunMetrics): Promise<void> {
@@ -1166,32 +1461,280 @@ export class DiscordNotifier {
       .map((s) => `${statusEmoji(s.state)} \`${s.id}\` — ${s.lastActivity.slice(0, 60)}`)
       .join("\n");
 
+    await this.send({
+      embeds: [{
+        title: `📊 Progress — Iteration ${metrics.iteration}`,
+        color: 0x9b59b6,
+        fields: [
+          { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+          { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+          { name: "\u200b", value: "\u200b", inline: true },
+          { name: "Agents", value: agentLines },
+        ],
+        footer: { text: this.projectName },
+      }],
+    });
+  }
+
+  /**
+   * Post an agent question to Discord. If options are provided, shows buttons.
+   * Otherwise waits for a text reply. Returns the answer or null on timeout.
+   */
+  async promptQuestion(question: AgentQuestion, abortSignal?: AbortSignal): Promise<string | null> {
+    if (this.config.mode !== "interactive") return null;
+    const target = this.thread ?? this.channel;
+    if (!target) return null;
+
+    // If already aborted (terminal answered first), return immediately
+    if (abortSignal?.aborted) return null;
+
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
     const embed = {
-      title: `📊 Progress — Iteration ${metrics.iteration}`,
-      color: 0x9b59b6,
-      fields: [
-        { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
-        { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
-        { name: "\u200b", value: "\u200b", inline: true },
-        { name: "Agents", value: agentLines },
-      ],
-      footer: { text: this.projectName },
+      title: `❓ ${question.from} needs your input`,
+      description: question.question,
+      color: 0xe67e22, // orange
+      footer: { text: "Reply in this thread or click a button" },
     };
 
-    if (this.config.mode === "updates") {
-      await sendWebhook({ embeds: [embed] });
-    } else if (this.channel) {
-      await this.channel.send({ embeds: [embed] });
+    if (question.options && question.options.length > 0) {
+      const row = new ActionRowBuilder();
+      for (const opt of question.options.slice(0, 5)) {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`question_${opt}`)
+            .setLabel(opt.slice(0, 80))
+            .setStyle(ButtonStyle.Primary),
+        );
+      }
+
+      const msg = await target.send({ embeds: [embed], components: [row] });
+
+      // Clean up on abort (terminal won the race)
+      const cleanup = () => {
+        msg.edit({ embeds: [{ title: "✅ Answered via terminal", color: 0x2ecc71 }], components: [] }).catch(() => {});
+      };
+      if (abortSignal) abortSignal.addEventListener("abort", cleanup, { once: true });
+
+      try {
+        const buttonPromise = msg.awaitMessageComponent({
+          filter: (i: any) => i.customId.startsWith("question_"),
+          time: 10 * 60 * 1000,
+        }).then(async (interaction: any) => {
+          const answer = interaction.customId.replace("question_", "");
+          await interaction.update({
+            embeds: [{ title: `✅ Answered: ${answer}`, color: 0x2ecc71 }],
+            components: [],
+          });
+          return answer;
+        });
+
+        const replyPromise = target.awaitMessages({
+          filter: (m: any) => !m.author.bot,
+          max: 1,
+          time: 10 * 60 * 1000,
+        }).then((collected: any) => {
+          const reply = collected.first();
+          if (!reply) return null;
+          msg.edit({ embeds: [{ title: `✅ Answered via reply`, color: 0x2ecc71 }], components: [] }).catch(() => {});
+          return reply.content;
+        });
+
+        // Also race against the abort signal
+        const abortPromise = abortSignal
+          ? new Promise<null>((resolve) => abortSignal.addEventListener("abort", () => resolve(null), { once: true }))
+          : new Promise<null>(() => {}); // never resolves
+
+        return await Promise.race([buttonPromise, replyPromise, abortPromise]);
+      } catch {
+        await msg.edit({
+          embeds: [{ title: "⏰ Question timed out", color: 0x95a5a6 }],
+          components: [],
+        });
+        return null;
+      } finally {
+        if (abortSignal) abortSignal.removeEventListener("abort", cleanup);
+      }
+    } else {
+      const msg = await target.send({ embeds: [embed] });
+
+      const cleanup = () => {
+        msg.edit({ embeds: [{ title: "✅ Answered via terminal", color: 0x2ecc71 }] }).catch(() => {});
+      };
+      if (abortSignal) abortSignal.addEventListener("abort", cleanup, { once: true });
+
+      try {
+        const replyPromise = target.awaitMessages({
+          filter: (m: any) => !m.author.bot,
+          max: 1,
+          time: 10 * 60 * 1000,
+        }).then((collected: any) => {
+          const reply = collected.first();
+          if (!reply) return null;
+          msg.edit({ embeds: [{ title: "✅ Answered", color: 0x2ecc71 }] }).catch(() => {});
+          return reply.content;
+        });
+
+        const abortPromise = abortSignal
+          ? new Promise<null>((resolve) => abortSignal.addEventListener("abort", () => resolve(null), { once: true }))
+          : new Promise<null>(() => {});
+
+        return await Promise.race([replyPromise, abortPromise]);
+      } catch {
+        await msg.edit({ embeds: [{ title: "⏰ Question timed out", color: 0x95a5a6 }] });
+        return null;
+      } finally {
+        if (abortSignal) abortSignal.removeEventListener("abort", cleanup);
+      }
     }
   }
 
   /**
-   * Interactive checkpoint — sends Discord buttons, awaits user response.
-   * Returns "continue", "stop", or "no-response" (caller falls back to terminal).
-   * Only works in interactive mode with an active bot connection.
+   * Post a reaction summary — shows what happened after a human message.
+   * Called ~30s after a human message is delivered.
    */
+  async notifyReactionSummary(agentId: string, recentLines: string[]): Promise<void> {
+    if (this.config.mode === "off") return;
+    if (recentLines.length === 0) return;
+
+    const body = recentLines.slice(-10).map((l) => `\`${l.trim()}\``).join("\n");
+
+    await this.send({
+      embeds: [{
+        title: `🔄 What happened after your message to ${agentId}`,
+        description: body.slice(0, 4000),
+        color: 0x9b59b6,
+        footer: { text: `${recentLines.length} events in the last 30s` },
+      }],
+    });
+  }
+
+  /**
+   * Error escalation — actionable embed with Retry/Skip/Stop buttons.
+   * Returns the user's choice or "no-response" on timeout.
+   */
+  async promptErrorEscalation(
+    agentId: string,
+    error: string,
+  ): Promise<"retry" | "skip" | "stop" | "no-response"> {
+    if (this.config.mode !== "interactive") return "no-response";
+    const target = this.thread ?? this.channel;
+    if (!target) return "no-response";
+
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("error_retry")
+        .setLabel("Retry")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji("🔄"),
+      new ButtonBuilder()
+        .setCustomId("error_skip")
+        .setLabel("Skip")
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji("⏭️"),
+      new ButtonBuilder()
+        .setCustomId("error_stop")
+        .setLabel("Stop")
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji("⏹️"),
+    );
+
+    const msg = await target.send({
+      embeds: [{
+        title: `❌ Error in ${agentId}`,
+        description: `\`\`\`\n${error.slice(0, 1000)}\n\`\`\``,
+        color: 0xe74c3c,
+        footer: { text: "Choose an action" },
+      }],
+      components: [row],
+    });
+
+    try {
+      const interaction = await msg.awaitMessageComponent({
+        filter: (i: any) => i.customId.startsWith("error_"),
+        time: 5 * 60 * 1000,
+      });
+
+      const action = interaction.customId.replace("error_", "") as "retry" | "skip" | "stop";
+      const labels: Record<string, string> = { retry: "🔄 Retrying...", skip: "⏭️ Skipping...", stop: "⏹️ Stopping..." };
+      await interaction.update({
+        embeds: [{ title: labels[action], color: action === "stop" ? 0xe74c3c : 0x3498db }],
+        components: [],
+      });
+      return action;
+    } catch {
+      await msg.edit({
+        embeds: [{ title: "⏰ No response — continuing", color: 0x95a5a6 }],
+        components: [],
+      });
+      return "no-response";
+    }
+  }
+
+  /**
+   * Confidence signal — posts a review embed with Accept/Review buttons.
+   * Returns "accept", "review", or "no-response".
+   */
+  async promptConfidenceReview(
+    agentId: string,
+    content: string,
+  ): Promise<"accept" | "review" | "no-response"> {
+    if (this.config.mode !== "interactive") return "no-response";
+    const target = this.thread ?? this.channel;
+    if (!target) return "no-response";
+
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("confidence_accept")
+        .setLabel("Accept")
+        .setStyle(ButtonStyle.Success)
+        .setEmoji("✅"),
+      new ButtonBuilder()
+        .setCustomId("confidence_review")
+        .setLabel("Review")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji("🔍"),
+    );
+
+    const msg = await target.send({
+      embeds: [{
+        title: `⚠️ ${agentId} flagged low confidence`,
+        description: content.slice(0, 2000),
+        color: 0xf39c12,
+        footer: { text: "Accept to continue, or Review to provide guidance" },
+      }],
+      components: [row],
+    });
+
+    try {
+      const interaction = await msg.awaitMessageComponent({
+        filter: (i: any) => i.customId.startsWith("confidence_"),
+        time: 5 * 60 * 1000,
+      });
+
+      const action = interaction.customId.replace("confidence_", "") as "accept" | "review";
+      await interaction.update({
+        embeds: [{ title: action === "accept" ? "✅ Accepted" : "🔍 Reviewing...", color: 0x2ecc71 }],
+        components: [],
+      });
+      return action;
+    } catch {
+      await msg.edit({
+        embeds: [{ title: "⏰ No response — accepting", color: 0x95a5a6 }],
+        components: [],
+      });
+      return "no-response";
+    }
+  }
+
   async promptCheckpoint(metrics: RunMetrics): Promise<"continue" | "stop" | "no-response"> {
-    if (this.config.mode !== "interactive" || !this.channel) return "no-response";
+    if (this.config.mode !== "interactive") return "no-response";
+    const target = this.thread ?? this.channel;
+    if (!target) return "no-response";
 
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
 
@@ -1213,37 +1756,33 @@ export class DiscordNotifier {
         .setEmoji("⏹️"),
     );
 
-    const msg = await this.channel.send({
-      embeds: [
-        {
-          title: `⏸️ Checkpoint — Iteration ${metrics.iteration}`,
-          description: "The agent run is paused. **Continue** or **stop**?",
-          color: 0xf39c12,
-          fields: [
-            { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
-            { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
-            { name: "\u200b", value: "\u200b", inline: true },
-            { name: "Agents", value: agentLines },
-          ],
-        },
-      ],
+    const msg = await target.send({
+      embeds: [{
+        title: `⏸️ Checkpoint — Iteration ${metrics.iteration}`,
+        description: "The agent run is paused. **Continue** or **stop**?",
+        color: 0xf39c12,
+        fields: [
+          { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+          { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+          { name: "\u200b", value: "\u200b", inline: true },
+          { name: "Agents", value: agentLines },
+        ],
+      }],
       components: [row],
     });
 
     try {
       const interaction = await msg.awaitMessageComponent({
         filter: (i: any) => i.customId.startsWith("checkpoint_"),
-        time: 5 * 60 * 1000, // 5 minutes
+        time: 5 * 60 * 1000,
       });
 
       const continued = interaction.customId === "checkpoint_continue";
       await interaction.update({
-        embeds: [
-          {
-            title: continued ? "▶️ Continuing..." : "⏹️ Stopping...",
-            color: continued ? 0x2ecc71 : 0xe74c3c,
-          },
-        ],
+        embeds: [{
+          title: continued ? "▶️ Continuing..." : "⏹️ Stopping...",
+          color: continued ? 0x2ecc71 : 0xe74c3c,
+        }],
         components: [],
       });
 
@@ -1270,25 +1809,21 @@ export class DiscordNotifier {
 
     const allDone = [...metrics.agentStatuses.values()].every((s) => s.state === "done");
 
-    const embed = {
-      title: allDone ? "✅ Agent Run Complete" : "⏹️ Agent Run Stopped",
-      description: `**${projectConfig.description}**`,
-      color: allDone ? 0x2ecc71 : 0xf39c12,
-      fields: [
-        { name: "Duration", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
-        { name: "Iterations", value: String(metrics.iteration), inline: true },
-        { name: "Total Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
-        { name: "Agents", value: agentLines },
-      ],
-      footer: { text: "Results in workspace/results/" },
-      timestamp: new Date().toISOString(),
-    };
-
-    if (this.config.mode === "updates") {
-      await sendWebhook({ embeds: [embed] });
-    } else if (this.channel) {
-      await this.channel.send({ embeds: [embed] });
-    }
+    await this.send({
+      embeds: [{
+        title: allDone ? "✅ Agent Run Complete" : "⏹️ Agent Run Stopped",
+        description: `**${projectConfig.description}**`,
+        color: allDone ? 0x2ecc71 : 0xf39c12,
+        fields: [
+          { name: "Duration", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+          { name: "Iterations", value: String(metrics.iteration), inline: true },
+          { name: "Total Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+          { name: "Agents", value: agentLines },
+        ],
+        footer: { text: "Results in workspace/results/" },
+        timestamp: new Date().toISOString(),
+      }],
+    });
   }
 
   async shutdown(): Promise<void> {
@@ -1315,13 +1850,14 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 ║ [14:23:06] TOOL  researcher -> Read                     ║
 ║ [14:23:08] MSG   orchestrator -> researcher: Please...  ║
 ║ [14:23:10] TASK  worker-1 <- task-1: Implement the...   ║
+║ [14:23:12] QUEST researcher: Which auth strategy?       ║
 ║ [14:23:15] DONE  researcher -> result-1: Found 12...    ║
 ║ [14:23:18] THINK worker-1: Working on the implement...  ║
 ║                                                          ║
 ╠══════════════════════════════════════════════════════════╣
 ║ > @orchestrator: _                                       ║
 ╚══════════════════════════════════════════════════════════╝
- [Tab] agents  [↑↓] scroll  [P] pause  [S] stop  [D] detail
+ [↑↓] scroll  [M] msg  [T] logs  [R] recap  [D] detail  [S] stop
 ```
 
 **Header section:**
@@ -1343,7 +1879,9 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
   - `MSG  ` — inter-agent message, from -> to (cyan, bold)
   - `TASK ` — task assignment (yellow)
   - `DONE ` — result submitted (green, bold)
+  - `QUEST` — agent question awaiting human answer (orange, bold)
 - Inter-agent messages (`MSG`, `TASK`, `DONE`) are visually prominent — they show the communication flow between agents
+- `QUEST` events are highlighted in orange and bold — they indicate an agent is blocked and needs input
 
 **Input bar (always visible at the bottom):**
 - A persistent message input field: `> @{agent}: {message}_`
@@ -1353,6 +1891,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 - Press Escape to clear the input
 - When the input bar is empty, the arrow keys control stream scrolling
 - When typing, the input captures keystrokes (standard text editing: backspace, left/right arrows)
+- **Question mode:** When an agent asks a question, the input bar changes to `? [agentId] question: _` — type the answer and press Enter
 
 **Agent detail view (toggle with `D`):**
 - Replaces the stream body with a single-agent detail view
@@ -1360,12 +1899,23 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 - Arrow keys switch between agents
 - Agent selector at top: `< orchestrator | researcher | worker-1 >` with arrows to navigate
 
-**Agent table view (toggle with `T`):**
-- Shows the overview table with all agents, status, turns, estimated cost, last activity
-- Quick status check, then press `T` again to return to stream
+**Log tailing view (`T`):**
+- Press `T` to open log view — shows agent picker first (inline selector)
+- Select an agent to view its full conversation transcript from `workspace/logs/{agentId}.log`
+- Press `T` again or Tab to cycle to the next agent's log
+- Select `_stream.log` option to view the unified interleaved stream
+- Arrow keys scroll, Escape returns to main stream view
+- Each agent's log shows the full conversation: assistant turns, tool calls, tool results, human messages
+
+**Recap view (`R`):**
+- Shows a high-level summary of the run, filtering the activity stream to important events only
+- Includes: `HMSG` (human messages), `QUEST` (questions), `DONE` (results), `ERROR` (errors), `START`/`END` (agent lifecycle), `MSG` (inter-agent messages)
+- Excludes: `THINK` and `TOOL` noise
+- Displays milestones reached, questions asked/answered, key decisions, errors
+- Press `R` again to return to the full stream view
 
 **Inline selection (for any agent picker prompts):**
-- When a selection is needed (e.g., picking an agent), show an inline selector:
+- When a selection is needed (e.g., picking an agent for log tailing), show an inline selector:
   - Arrow up/down to highlight an option
   - Type to filter/search (fuzzy match on agent ID and role)
   - Tab to autocomplete the first match
@@ -1377,20 +1927,23 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 - `stop()` — graceful cleanup of intervals and raw mode
 - `pauseRender()` / `resumeRender()` — pause/resume the render interval
 - `toggleDetailView()` — switch between stream and detail views
-- `toggleTableView()` — switch between stream and agent table
+- `toggleLogView(agentId?)` — open log tailing for a specific agent or show picker
+- `toggleRecapView()` — switch between stream and recap view
+- `showQuestion(question, abortSignal?)` — display agent question in input bar, returns a Promise<string|null> that resolves when answered or null if aborted (Discord answered first)
 - `streamScrollUp()` / `streamScrollDown()` — scroll the stream feed
 - `handleInput(key: Buffer, callbacks)` — route keystrokes to input bar, navigation, or control shortcuts (callbacks provide `onShutdown`, `onSendMessage`, `getActiveAgentIds`, `getAllAgentIds`)
 
 **Footer (context-sensitive):**
-- Stream view: `[Tab] agents  [↑↓] scroll  [P] pause  [S] stop  [D] detail  [T] table`
+- Stream view: `[↑↓] scroll  [M] msg  [T] logs  [R] recap  [D] detail  [P] pause  [S] stop`
 - Detail view: `[←→] switch agent  [D] back  [P] pause  [S] stop`
-- Table view: `[T] back to stream  [P] pause  [S] stop`
+- Log view: `[T/Tab] next agent  [↑↓] scroll  [Esc] back`
+- Recap view: `[R] back to stream  [↑↓] scroll  [P] pause  [S] stop`
 
 **Implementation notes:**
 - Use raw ANSI codes and `process.stdout.write` — no external TUI library
 - Updates in-place using `\x1b[2J\x1b[H` (clear screen) on a 500ms interval
 - Uses box-drawing characters (╔═╗║╚╝) for borders
-- Uses ANSI colors: `\x1b[1m` bold, `\x1b[2m` dim, `\x1b[31m` red, `\x1b[32m` green, `\x1b[33m` yellow, `\x1b[36m` cyan, `\x1b[0m` reset
+- Uses ANSI colors: `\x1b[1m` bold, `\x1b[2m` dim, `\x1b[31m` red, `\x1b[32m` green, `\x1b[33m` yellow, `\x1b[36m` cyan, `\x1b[33;1m` orange/bold (for QUEST), `\x1b[0m` reset
 - Get terminal width/height from `process.stdout.columns` and `process.stdout.rows`
 - Truncate lines to terminal width to prevent wrapping artifacts
 - Emoji for status: ✅ done, 🔄 working, ⏳ waiting, ❌ error, ⏸ paused
@@ -1400,7 +1953,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 export function createDashboard(
   config: ProjectConfig,
   metrics: RunMetrics,
-  workspacePath: string,  // needed to read workspace/logs/_stream.log
+  workspacePath: string,  // needed to read workspace/logs/_stream.log and workspace/logs/{agentId}.log
 ): Dashboard;
 ```
 
@@ -1416,10 +1969,13 @@ dashboard.handleInput(key: Buffer, callbacks: {
 
 The dashboard manages all input routing internally:
 - When the input bar has focus (user is typing), keystrokes go to the input buffer
-- When the input bar is empty, single-key shortcuts (`D`, `T`, `P`, `S`) trigger view/control actions
+- When the input bar is empty, single-key shortcuts (`D`, `T`, `R`, `M`, `P`, `S`) trigger view/control actions
 - Arrow keys go to stream scrolling when input bar is empty, or cursor movement when typing
-- Tab triggers agent ID autocomplete using the `getAllAgentIds` callback
+- Tab triggers agent ID autocomplete (in message input) or cycles agents (in log view)
 - Enter parses `@target: message` from the input buffer and calls `onSendMessage`
+- `M` focuses the input bar for messaging (equivalent to clicking into it)
+- `T` opens log tailing with agent picker, then Tab/T cycles between agents
+- `R` toggles the recap view (filtered important events only)
 
 ### Generate `README.md`
 
@@ -1460,18 +2016,45 @@ The dashboard shows a **live activity stream** by default — all agent events i
 | Key | Action |
 |-----|--------|
 | `↑` `↓` | Scroll stream feed up/down |
+| `M` | Focus message input bar |
+| `T` | Open log tailing (pick agent, Tab to cycle) |
+| `R` | Toggle recap view (filtered important events) |
 | `D` | Toggle detail view (single agent live output) |
-| `T` | Toggle table view (agent status overview) |
 | `P` | Pause / resume |
 | `S` | Graceful stop (press twice to force quit) |
-| `Tab` | Autocomplete agent ID in message input |
+| `Tab` | Autocomplete agent ID / cycle log agent |
 | `Enter` | Send message from input bar |
-| `Esc` | Clear input bar |
+| `Esc` | Clear input / return to stream |
 | `Ctrl+C` | Same as S (graceful stop, twice to force) |
 
 ### Messaging
 
-Type directly in the input bar at the bottom: `@agent-id: your message` then Enter. Use `@all:` to broadcast. Tab autocompletes agent IDs.
+Type directly in the input bar at the bottom: `@agent-id: your message` then Enter. Use `@all:` to broadcast. Tab autocompletes agent IDs. Messages go to the orchestrator by default when sent from Discord.
+
+### Agent Questions
+
+When an agent is stuck, it writes a question file. The question appears both in the terminal (input bar switches to question mode) and in Discord (embed with buttons). The first answer wins — race between Discord and terminal. The answer is injected back into the agent.
+
+### Discord Integration
+
+If configured with interactive mode, all run messages go to a dedicated Discord thread. You can:
+- **Send messages** by typing in the thread — they route to the orchestrator
+- **Answer agent questions** via buttons or text replies in the thread
+- **Handle errors** with Retry/Skip/Stop buttons when an agent hits an error
+- **Review low-confidence outputs** when an agent flags uncertainty
+
+### Discord vs Terminal Feature Parity
+
+| Feature | Discord | Terminal |
+|---------|---------|---------|
+| Send message to orchestrator | Type in thread | `[M]` input bar |
+| Agent questions | Embed + buttons/reply | Inline prompt in input bar |
+| Recap/overview | Periodic summary embed | `[R]` key |
+| Full agent logs | Not needed | `[T]` with agent switching |
+| Status updates | Embeds (filtered) | Activity stream (everything) |
+| Checkpoint continue/stop | Buttons | Y/n prompt |
+| Error escalation | Embed + Retry/Skip/Stop | Stream + prompt |
+| Low confidence review | Embed + Accept/Review | Inline question |
 
 ## Stop Conditions
 
@@ -1496,11 +2079,12 @@ src/
 ├── safety/            — Limits, checkpoints, sandboxing
 ├── comms/             — Shared workspace utilities + unified stream
 ├── dashboard/         — Terminal UI (stream-first with input bar)
-└── notifications/     — Discord integration
+└── notifications/     — Discord integration (threads, questions, error escalation)
 workspace/
 ├── tasks/             — Task assignments
 ├── results/           — Agent outputs
 ├── messages/          — Inter-agent messages
+├── questions/         — Agent questions awaiting human answers
 └── logs/
     ├── _stream.log    — Unified activity stream (all agents)
     └── {agent}.log    — Per-agent conversation transcripts
@@ -1533,14 +2117,15 @@ A multi-agent collaboration project generated by `/agent-factory`. {agent-count}
 - `src/config.ts` — All agent definitions and stop conditions. Edit this to customize.
 - `src/run.ts` — Entry point. Run with `npx tsx src/run.ts`.
 - `src/patterns/{pattern}.ts` — The collaboration logic.
-- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs, `workspace/logs/` for transcripts, `workspace/logs/_stream.log` for the unified activity stream.
+- `workspace/` — Agents read/write here. Check `workspace/results/` for outputs, `workspace/logs/` for transcripts, `workspace/logs/_stream.log` for the unified activity stream, `workspace/questions/` for agent questions.
 
 ## Dashboard & Controls
 
 - The dashboard shows a **live activity stream** by default with all agent events chronologically
 - Type `@agent-id: message` in the input bar at the bottom and press Enter to message agents
 - Use Tab to autocomplete agent IDs, `@all:` to broadcast
-- `↑↓` scroll the stream, `D` for detail view, `T` for table view, `P` pause, `S` stop (2x = force)
+- `↑↓` scroll, `M` message, `T` log tailing, `R` recap, `D` detail, `P` pause, `S` stop (2x = force)
+- Agents can ask you questions — they appear in the input bar and in Discord (if connected)
 
 ## Running
 
@@ -1570,6 +2155,49 @@ npx tsx src/run.ts
 # DISCORD_BOT_TOKEN=your-bot-token-here
 # DISCORD_CHANNEL_ID=your-channel-id-here
 ```
+
+### Generate `workspace/ask-human.sh`
+
+A helper script that agents can call via Bash to ask the human a question. This is more reliable than having agents write JSON manually.
+
+```bash
+#!/bin/bash
+# Usage: bash workspace/ask-human.sh --from "agent-id" --question "Your question" [--options "A,B,C"]
+
+FROM=""
+QUESTION=""
+OPTIONS=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --from) FROM="$2"; shift 2 ;;
+    --question) QUESTION="$2"; shift 2 ;;
+    --options) OPTIONS="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ -z "$FROM" ] || [ -z "$QUESTION" ]; then
+  echo "Usage: bash workspace/ask-human.sh --from <agent-id> --question <question> [--options <A,B,C>]"
+  exit 1
+fi
+
+TIMESTAMP=$(date +%s%3N)
+FILE="workspace/questions/${FROM}-${TIMESTAMP}.json"
+
+if [ -n "$OPTIONS" ]; then
+  # Convert comma-separated options to JSON array
+  OPTIONS_JSON=$(echo "$OPTIONS" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')
+  echo "{\"from\":\"${FROM}\",\"question\":\"${QUESTION}\",\"options\":[${OPTIONS_JSON}]}" > "$FILE"
+else
+  echo "{\"from\":\"${FROM}\",\"question\":\"${QUESTION}\"}" > "$FILE"
+fi
+
+echo "Question submitted: $FILE"
+echo "Waiting for human answer..."
+```
+
+Make sure to set the executable bit: `chmod +x workspace/ask-human.sh`
 
 ## Step 3 — Install dependencies and offer to run
 

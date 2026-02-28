@@ -11,7 +11,7 @@ Claude Code plugin — a general-purpose toolbox for macOS automation, scheduled
 | Skill | Purpose |
 |-------|---------|
 | `/launchd` | Manages macOS scheduled tasks (LaunchAgents) via launchd — list, add, and remove jobs |
-| `/factory` | Design and generate multi-agent collaboration systems — describe a task, get a ready-to-run TypeScript project with collaborating AI agents |
+| `/factory` | Design and generate multi-agent collaboration systems with Discord interactive control, agent-to-human questions, and real-time dashboards |
 
 Skill definitions live in `.claude/skills/{skill-name}/SKILL.md`. Registration in `.claude-plugin/plugin.json`.
 
