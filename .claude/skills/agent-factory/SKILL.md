@@ -226,13 +226,13 @@ The `ProjectConfig` includes a `discord` field indicating the chosen mode (`"off
 
 Then proceed to **Step 2 — Generate Project**.
 
-## Step 2 — Generate the project directory
+## Step 2 — Generate the project files
 
-Ask the user for a project name (suggest one based on the task, e.g. `perf-audit-team`). Create the directory in CWD.
+Generate all project files directly in the current working directory (CWD) — do NOT create a subdirectory. The user is expected to start Claude Code in the directory where they want the project created.
 
 ```bash
-mkdir -p {project-name}/src/{agents,patterns,safety,comms,dashboard,notifications}
-mkdir -p {project-name}/workspace/{tasks,results,messages}
+mkdir -p src/{agents,patterns,safety,comms,dashboard,notifications}
+mkdir -p workspace/{tasks,results,messages}
 ```
 
 ### Generate `package.json`
@@ -1265,7 +1265,7 @@ After generating all files:
 
 1. Install dependencies:
    ```bash
-   cd {project-name} && npm install
+   npm install
    ```
 
 2. Confirm success to the user. Show what was created.
@@ -1279,7 +1279,7 @@ After generating all files:
 
 If the user chooses to run, execute:
 ```bash
-cd {project-name} && npx tsx src/run.ts
+npx tsx src/run.ts
 ```
 
 ## Error handling
