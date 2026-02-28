@@ -250,6 +250,7 @@ mkdir -p workspace/{tasks,results,messages,logs,questions}
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^1.0.0",
+    "dotenv": "^16.0.0",
     "tsx": "^4.0.0"
     // If discord.mode === "interactive", also add: "discord.js": "^14.0.0"
   },
@@ -603,6 +604,7 @@ This is the CLI entry point. It loads config, runs the chosen pattern, and displ
 - **Keyboard routing** — all keystrokes go through `dashboard.handleInput(key)` which routes to either the input bar or navigation controls depending on context
 
 ```typescript
+import "dotenv/config";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { config } from "./config.js";
@@ -816,6 +818,48 @@ async function main() {
   const questionsDir = path.join(workspacePath, "questions");
   const seenQuestions = new Set<string>();
 
+  /** Handle a single question — runs detached so multiple questions process concurrently */
+  async function handleQuestion(filePath: string, question: AgentQuestion): Promise<void> {
+    appendStream(workspacePath, `[${ts()}] QUEST ${question.from}: ${question.question.slice(0, 120)}\n`);
+
+    // Race: Discord prompt vs terminal prompt — first answer wins
+    // Only include Discord in the race if it can actually prompt (interactive mode)
+    const raceAbort = new AbortController();
+    const terminalPromise = dashboard.showQuestion(question, raceAbort.signal);
+
+    const candidates: Promise<{ answer: string | null; source: string }>[] = [
+      terminalPromise.then((a) => ({ answer: a, source: "terminal" })),
+    ];
+
+    if (config.discord.mode === "interactive") {
+      const discordPromise = discord.promptQuestion(question, raceAbort.signal);
+      candidates.push(discordPromise.then((a) => ({ answer: a, source: "discord" })));
+    }
+
+    const result = await Promise.race(candidates);
+
+    // Signal the loser to stop listening
+    raceAbort.abort();
+
+    const finalAnswer = result.answer;
+    const source = result.source;
+
+    if (finalAnswer) {
+      question.answered = true;
+      question.answer = finalAnswer;
+      await fs.writeFile(filePath, JSON.stringify(question, null, 2));
+      await answerQuestion(question.from, finalAnswer);
+      appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (${source}): ${finalAnswer.slice(0, 120)}\n`);
+    } else {
+      const fallback = "No response received. Proceed with your best judgment.";
+      question.answered = true;
+      question.answer = fallback;
+      await fs.writeFile(filePath, JSON.stringify(question, null, 2));
+      await answerQuestion(question.from, fallback);
+      appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (timeout): ${fallback}\n`);
+    }
+  }
+
   const questionWatcher = setInterval(async () => {
     if (globalAbort.signal.aborted) return;
     try {
@@ -830,43 +874,8 @@ async function main() {
         const question: AgentQuestion = JSON.parse(raw);
         if (question.answered) continue;
 
-        appendStream(workspacePath, `[${ts()}] QUEST ${question.from}: ${question.question.slice(0, 120)}\n`);
-
-        // Race: Discord prompt vs terminal prompt — first answer wins
-        // Use an AbortController so the loser can clean up its listener
-        const raceAbort = new AbortController();
-        const discordPromise = discord.promptQuestion(question, raceAbort.signal);
-        const terminalPromise = dashboard.showQuestion(question, raceAbort.signal);
-
-        const result = await Promise.race([
-          discordPromise.then((a) => ({ answer: a, source: "discord" as const })),
-          terminalPromise.then((a) => ({ answer: a, source: "terminal" as const })),
-        ]);
-
-        // Signal the loser to stop listening
-        raceAbort.abort();
-
-        const finalAnswer = result.answer;
-        const source = result.source;
-
-        if (finalAnswer) {
-          // Update question file
-          question.answered = true;
-          question.answer = finalAnswer;
-          await fs.writeFile(filePath, JSON.stringify(question, null, 2));
-
-          // Inject answer into the asking agent
-          await answerQuestion(question.from, finalAnswer);
-          appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (${source}): ${finalAnswer.slice(0, 120)}\n`);
-        } else {
-          // Both timed out — inject fallback so the agent isn't blocked forever
-          const fallback = "No response received. Proceed with your best judgment.";
-          question.answered = true;
-          question.answer = fallback;
-          await fs.writeFile(filePath, JSON.stringify(question, null, 2));
-          await answerQuestion(question.from, fallback);
-          appendStream(workspacePath, `[${ts()}] HMSG  human -> ${question.from} (timeout): ${fallback}\n`);
-        }
+        // Fire and forget — each question runs concurrently without blocking the scan
+        handleQuestion(filePath, question).catch(() => {});
       }
     } catch {
       // Best effort — questions dir may not exist yet
@@ -1018,7 +1027,7 @@ Each pattern function must:
 - Pass `logDir`, `config.workspacePath`, and an `onQuestionDetected` callback as the last three arguments to every `runAgent()` call (after `onMessage`) — both dirs are needed for per-agent logs and the unified stream, and the callback logs a QUEST event early (the question watcher picks up the file on its next 2s poll)
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
-- Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
+- Call `promptCheckpoint(metrics, config.stopConditions, discord, dashboard.promptCheckpoint.bind(dashboard))` at checkpoint intervals
 - Update `metrics.agentStatuses` and `metrics.totalEstimatedCostEur` in real-time
 - Call `dashboard.update()` after each status change
 - Call `discord.notifyAgentStatus(status)` when an agent's state changes to working/done/error
@@ -1075,14 +1084,16 @@ export function checkLimits(
 Pauses and asks the user to continue:
 
 ```typescript
-import * as readline from "node:readline";
 import type { RunMetrics, StopConditions } from "../agents/types.js";
 import type { DiscordNotifier } from "../notifications/discord.js";
+
+export type CheckpointPromptFn = (metrics: RunMetrics) => Promise<boolean>;
 
 export async function promptCheckpoint(
   metrics: RunMetrics,
   limits: StopConditions,
   discord?: DiscordNotifier,
+  terminalPrompt?: CheckpointPromptFn,
 ): Promise<boolean> {
   if (!limits.checkpointEveryN) return true;
   if (metrics.iteration % limits.checkpointEveryN !== 0) return true;
@@ -1096,34 +1107,13 @@ export async function promptCheckpoint(
     // "no-response" → fall through to terminal prompt
   }
 
-  // Terminal fallback
-  const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
-
-  console.log("\n" + "=".repeat(60));
-  console.log("⏸  CHECKPOINT — Iteration", metrics.iteration);
-  console.log(`   Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`);
-  console.log(`   Estimated cost: ~€${metrics.totalEstimatedCostEur.toFixed(2)}`);
-  console.log("=".repeat(60));
-
-  for (const [, status] of metrics.agentStatuses) {
-    const icon = status.state === "done" ? "✅" : status.state === "working" ? "🔄" : "⏳";
-    console.log(`   ${icon} ${status.id} (${status.role}): ${status.lastActivity}`);
+  // Terminal prompt — routed through the dashboard to avoid stdin conflicts
+  if (terminalPrompt) {
+    return terminalPrompt(metrics);
   }
 
-  console.log("=".repeat(60));
-
-  // Send a Discord notification too (even in updates mode) so user knows it's paused
-  if (discord) {
-    await discord.notifyProgress(metrics);
-  }
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise<string>((resolve) => {
-    rl.question("\nContinue? [Y/n] ", resolve);
-  });
-  rl.close();
-
-  return answer.toLowerCase() !== "n";
+  // Final fallback: default to continue if no prompt mechanism available
+  return true;
 }
 ```
 
@@ -1502,7 +1492,7 @@ export class DiscordNotifier {
     };
 
     if (question.options && question.options.length > 0) {
-      const row = new ActionRowBuilder();
+      const row = new ActionRowBuilder<ButtonBuilder>();
       for (const opt of question.options.slice(0, 5)) {
         row.addComponents(
           new ButtonBuilder()
@@ -1629,7 +1619,7 @@ export class DiscordNotifier {
 
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
 
-    const row = new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId("error_retry")
         .setLabel("Retry")
@@ -1693,7 +1683,7 @@ export class DiscordNotifier {
 
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
 
-    const row = new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId("confidence_accept")
         .setLabel("Accept")
@@ -1749,7 +1739,7 @@ export class DiscordNotifier {
       .map((s) => `${statusEmoji(s.state)} \`${s.id}\` — ${s.lastActivity.slice(0, 60)}`)
       .join("\n");
 
-    const row = new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId("checkpoint_continue")
         .setLabel("Continue")
@@ -1887,6 +1877,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
   - `DONE ` — result submitted (green, bold)
   - `QUEST` — agent question awaiting human answer (orange, bold)
   - `WARN ` — low confidence flag or warning (yellow)
+  - `SYS  ` — system event like shutdown (dim yellow)
 - Inter-agent messages (`MSG`, `TASK`, `DONE`) are visually prominent — they show the communication flow between agents
 - `QUEST` events are highlighted in orange and bold — they indicate an agent is blocked and needs input
 
@@ -1937,6 +1928,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 - `toggleLogView(agentId?)` — open log tailing for a specific agent or show picker
 - `toggleRecapView()` — switch between stream and recap view
 - `showQuestion(question, abortSignal?)` — display agent question in input bar, returns a Promise<string|null> that resolves when answered or null if aborted (Discord answered first)
+- `promptCheckpoint(metrics)` — show a checkpoint prompt in the input bar (`⏸ Checkpoint iteration N — continue? [Y/n]`), returns a Promise<boolean> that resolves when the user presses Y (true) or N (false). Uses the same raw mode input handling as the rest of the dashboard — no readline.
 - `streamScrollUp()` / `streamScrollDown()` — scroll the stream feed
 - `handleInput(key: Buffer, callbacks)` — route keystrokes to input bar, navigation, or control shortcuts (callbacks provide `onShutdown`, `onSendMessage`, `getActiveAgentIds`, `getAllAgentIds`)
 
@@ -2161,6 +2153,17 @@ npx tsx src/run.ts
 # Discord — Interactive control (bot mode)
 # DISCORD_BOT_TOKEN=your-bot-token-here
 # DISCORD_CHANNEL_ID=your-channel-id-here
+```
+
+### Generate `.gitignore`
+
+```
+node_modules/
+dist/
+.env
+workspace/logs/
+workspace/questions/
+*.log
 ```
 
 ### Generate `workspace/ask-human.sh`
