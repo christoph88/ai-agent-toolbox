@@ -170,14 +170,68 @@ For each selected condition, ask for the specific value (e.g., "How many max ite
 
 Present the complete setup using `AskUserQuestion` (same format as assisted mode proposal). Get user approval before generating.
 
-Then proceed to **Step 3 — Generate Project**.
+Then proceed to **Step 1C — Discord Notifications**.
+
+## Step 1C — Discord Notifications (Optional)
+
+After the agent configuration is confirmed (end of Step 1A or 1B), ask:
+
+- **Question:** "Want Discord notifications for your agent team?"
+- **Options:**
+  - **Status updates** — "Get pinged when agents start, finish, or hit errors — simple webhook, no bot needed"
+  - **Interactive control** — "Approve checkpoints and handle permission requests right in Discord with buttons"
+  - **No thanks** — "I'll monitor everything in the terminal"
+
+### If the user picks "Status updates" (webhook mode)
+
+Ask: "Do you have a Discord webhook URL?"
+- **Options:**
+  - **Help me create one** — Walk them through it step-by-step:
+    1. Open your Discord server
+    2. Right-click the channel you want notifications in → **Edit Channel**
+    3. Go to **Integrations** → **Webhooks** → **New Webhook**
+    4. Name it (e.g., "Agent Factory"), optionally set an avatar
+    5. Click **Copy Webhook URL**
+    6. Paste it here
+  - **I'll add it later** — Generate config with a placeholder in `.env`. They can fill it in before running.
+
+The user can also paste a URL directly via the "Other" free-text option.
+
+### If the user picks "Interactive control" (bot mode)
+
+Ask: "Do you have a Discord bot set up?"
+- **Options:**
+  - **Help me create one** — Walk them through it step-by-step:
+    1. Go to https://discord.com/developers/applications
+    2. Click **New Application**, name it (e.g., "Agent Factory Bot")
+    3. Go to the **Bot** tab → click **Reset Token** → copy the token
+    4. Under **Privileged Gateway Intents**, enable **Message Content Intent**
+    5. Go to **OAuth2** → **URL Generator** → check the `bot` scope
+    6. In bot permissions, check: **Send Messages**, **Embed Links**, **Read Message History**
+    7. Copy the generated URL, open it in your browser, invite the bot to your server
+    8. In Discord, enable **Developer Mode** (User Settings → App Settings → Advanced)
+    9. Right-click the channel you want → **Copy Channel ID**
+    10. Share the bot token and channel ID
+  - **I'll add it later** — Generate config with placeholders in `.env`. They can fill them in before running.
+
+The user can also provide token + channel ID directly via the "Other" free-text option.
+
+### Discord configuration storage
+
+Store values in `.env` (never hardcode secrets):
+- Webhook mode: `DISCORD_WEBHOOK_URL`
+- Bot mode: `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID`
+
+The `ProjectConfig` includes a `discord` field indicating the chosen mode (`"off"`, `"updates"`, or `"interactive"`). The generated code reads credentials from env vars at runtime.
+
+Then proceed to **Step 2 — Generate Project**.
 
 ## Step 2 — Generate the project directory
 
 Ask the user for a project name (suggest one based on the task, e.g. `perf-audit-team`). Create the directory in CWD.
 
 ```bash
-mkdir -p {project-name}/src/{agents,patterns,safety,comms,dashboard}
+mkdir -p {project-name}/src/{agents,patterns,safety,comms,dashboard,notifications}
 mkdir -p {project-name}/workspace/{tasks,results,messages}
 ```
 
@@ -197,6 +251,7 @@ mkdir -p {project-name}/workspace/{tasks,results,messages}
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^1.0.0",
     "tsx": "^4.0.0"
+    // If discord.mode === "interactive", also add: "discord.js": "^14.0.0"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
@@ -255,12 +310,19 @@ export interface StopConditions {
   checkpointEveryN?: number;
 }
 
+export type DiscordMode = "off" | "updates" | "interactive";
+
+export interface DiscordConfig {
+  mode: DiscordMode;
+}
+
 export interface ProjectConfig {
   name: string;
   description: string;
   pattern: PatternType;
   agents: AgentConfig[];
   stopConditions: StopConditions;
+  discord: DiscordConfig;
   workspacePath: string;
 }
 
@@ -311,6 +373,9 @@ export const config: ProjectConfig = {
   ],
   stopConditions: {
     // Fill in from user's chosen stop conditions
+  },
+  discord: {
+    mode: "{off|updates|interactive}", // From Step 1C
   },
   workspacePath: "./workspace",
 };
@@ -417,6 +482,7 @@ import { runDebate } from "./patterns/debate.js";
 import { createDashboard } from "./dashboard/terminal-ui.js";
 import { checkLimits } from "./safety/limits.js";
 import { promptCheckpoint } from "./safety/checkpoints.js";
+import { DiscordNotifier } from "./notifications/discord.js";
 import type { RunMetrics } from "./agents/types.js";
 
 async function main() {
@@ -441,6 +507,11 @@ async function main() {
       lastActivity: "Not started",
     });
   }
+
+  // Initialize Discord notifications
+  const discord = new DiscordNotifier(config.discord, config.name);
+  await discord.initialize();
+  await discord.notifyRunStarted(config);
 
   const dashboard = createDashboard(config, metrics);
   const globalAbort = new AbortController();
@@ -475,7 +546,7 @@ async function main() {
       : config.pattern === "pipeline" ? runPipeline
       : runDebate;
 
-    await patternRunner(config, metrics, globalAbort, dashboard);
+    await patternRunner(config, metrics, globalAbort, dashboard, discord);
   } catch (err) {
     if (!globalAbort.signal.aborted) {
       console.error("\n❌ Unexpected error:", err);
@@ -490,6 +561,11 @@ async function main() {
       summary,
     );
     console.log(`\n📋 Summary written to ${config.workspacePath}/summary.md`);
+
+    // Send Discord completion notification and disconnect
+    await discord.notifyRunComplete(metrics, config);
+    await discord.shutdown();
+
     process.exit(0);
   }
 }
@@ -571,12 +647,14 @@ Judge prompt:
 ### Pattern implementation requirements
 
 Each pattern function must:
-- Accept `(config, metrics, abortController, dashboard)` arguments
+- Accept `(config, metrics, abortController, dashboard, discord)` arguments
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
-- Call `promptCheckpoint(metrics, config.stopConditions)` at checkpoint intervals
+- Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
 - Update `metrics.agentStatuses` and `metrics.totalEstimatedCostEur` in real-time
 - Call `dashboard.update()` after each status change
+- Call `discord.notifyAgentStatus(status)` when an agent's state changes to working/done/error
+- Call `discord.notifyProgress(metrics)` at the end of each iteration
 
 ### Generate `src/safety/limits.ts`
 
@@ -626,15 +704,26 @@ Pauses and asks the user to continue:
 ```typescript
 import * as readline from "node:readline";
 import type { RunMetrics, StopConditions } from "../agents/types.js";
+import type { DiscordNotifier } from "../notifications/discord.js";
 
 export async function promptCheckpoint(
   metrics: RunMetrics,
   limits: StopConditions,
+  discord?: DiscordNotifier,
 ): Promise<boolean> {
   if (!limits.checkpointEveryN) return true;
   if (metrics.iteration % limits.checkpointEveryN !== 0) return true;
   if (metrics.iteration === 0) return true;
 
+  // Try Discord first (interactive mode only)
+  if (discord) {
+    const response = await discord.promptCheckpoint(metrics);
+    if (response === "continue") return true;
+    if (response === "stop") return false;
+    // "no-response" → fall through to terminal prompt
+  }
+
+  // Terminal fallback
   const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
 
   console.log("\n" + "=".repeat(60));
@@ -649,6 +738,11 @@ export async function promptCheckpoint(
   }
 
   console.log("=".repeat(60));
+
+  // Send a Discord notification too (even in updates mode) so user knows it's paused
+  if (discord) {
+    await discord.notifyProgress(metrics);
+  }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const answer = await new Promise<string>((resolve) => {
@@ -747,6 +841,279 @@ export async function checkDone(workspacePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+```
+
+### Generate `src/notifications/discord.ts`
+
+Always generate this file. The `DiscordNotifier` class gracefully no-ops when `mode === "off"` — all public methods return early, so the rest of the codebase doesn't need conditional checks.
+
+**Smart messaging rules — use buttons vs. text appropriately:**
+- **Buttons:** Only for actionable decisions — checkpoint continue/stop, permission approve/deny. Always include clear labels and emoji on buttons.
+- **Rich embeds:** For status updates, progress reports, summaries. Use color-coded embeds (green=done, yellow=working, red=error, blue=info, purple=progress).
+- **Inline fields:** For compact stats (elapsed time, cost, turns) — set `inline: true` so they render side-by-side.
+- **Plain text:** Never. Always use embeds for a clean, scannable experience.
+
+```typescript
+import type { AgentStatus, RunMetrics, ProjectConfig, DiscordConfig } from "../agents/types.js";
+
+function statusEmoji(state: string): string {
+  const map: Record<string, string> = { done: "✅", working: "🔄", waiting: "⏳", error: "❌", paused: "⏸️" };
+  return map[state] ?? "❓";
+}
+
+function statusColor(state: string): number {
+  const map: Record<string, number> = { done: 0x2ecc71, working: 0xf39c12, error: 0xe74c3c, waiting: 0x95a5a6, paused: 0x3498db };
+  return map[state] ?? 0x95a5a6;
+}
+
+async function sendWebhook(content: object): Promise<void> {
+  const url = process.env.DISCORD_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(content),
+    });
+  } catch {
+    // Silently ignore — Discord is best-effort
+  }
+}
+
+export class DiscordNotifier {
+  private config: DiscordConfig;
+  private projectName: string;
+  private bot: any = null;
+  private channel: any = null;
+
+  constructor(config: DiscordConfig, projectName: string) {
+    this.config = config;
+    this.projectName = projectName;
+  }
+
+  async initialize(): Promise<void> {
+    if (this.config.mode === "off") return;
+
+    if (this.config.mode === "interactive") {
+      try {
+        const { Client, GatewayIntentBits } = await import("discord.js");
+        this.bot = new Client({
+          intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+        });
+
+        const token = process.env.DISCORD_BOT_TOKEN;
+        const channelId = process.env.DISCORD_CHANNEL_ID;
+        if (!token || !channelId) {
+          console.warn("⚠️  DISCORD_BOT_TOKEN or DISCORD_CHANNEL_ID missing — Discord disabled");
+          this.config.mode = "off";
+          return;
+        }
+
+        await this.bot.login(token);
+        this.channel = await this.bot.channels.fetch(channelId);
+        console.log("✅ Discord bot connected");
+      } catch (err) {
+        console.warn("⚠️  Discord bot connection failed — falling back to terminal:", err);
+        this.config.mode = "off";
+      }
+    } else if (this.config.mode === "updates") {
+      if (!process.env.DISCORD_WEBHOOK_URL) {
+        console.warn("⚠️  DISCORD_WEBHOOK_URL missing — Discord disabled");
+        this.config.mode = "off";
+      }
+    }
+  }
+
+  async notifyRunStarted(projectConfig: ProjectConfig): Promise<void> {
+    if (this.config.mode === "off") return;
+
+    const agentList = projectConfig.agents
+      .map((a) => `\`${a.id}\` — ${a.role} (${a.model})`)
+      .join("\n");
+
+    const embed = {
+      title: "🏭 Agent Run Started",
+      description: `**${projectConfig.description}**`,
+      color: 0x3498db,
+      fields: [
+        { name: "Pattern", value: projectConfig.pattern, inline: true },
+        { name: "Agents", value: String(projectConfig.agents.length), inline: true },
+        { name: "\u200b", value: "\u200b", inline: true }, // spacer
+        { name: "Team", value: agentList },
+      ],
+      timestamp: new Date().toISOString(),
+    };
+
+    if (this.config.mode === "updates") {
+      await sendWebhook({ embeds: [embed] });
+    } else if (this.channel) {
+      await this.channel.send({ embeds: [embed] });
+    }
+  }
+
+  async notifyAgentStatus(status: AgentStatus): Promise<void> {
+    if (this.config.mode === "off") return;
+    // Only notify on meaningful transitions
+    if (!["working", "done", "error"].includes(status.state)) return;
+
+    const embed = {
+      title: `${statusEmoji(status.state)} ${status.id}`,
+      description: status.lastActivity.slice(0, 200),
+      color: statusColor(status.state),
+      fields: [
+        { name: "Role", value: status.role, inline: true },
+        { name: "Turns", value: String(status.turns), inline: true },
+        { name: "Cost", value: `~€${status.estimatedCostEur.toFixed(2)}`, inline: true },
+      ],
+      footer: { text: this.projectName },
+    };
+
+    if (this.config.mode === "updates") {
+      await sendWebhook({ embeds: [embed] });
+    } else if (this.channel) {
+      await this.channel.send({ embeds: [embed] });
+    }
+  }
+
+  async notifyProgress(metrics: RunMetrics): Promise<void> {
+    if (this.config.mode === "off") return;
+
+    const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
+    const agentLines = [...metrics.agentStatuses.values()]
+      .map((s) => `${statusEmoji(s.state)} \`${s.id}\` — ${s.lastActivity.slice(0, 60)}`)
+      .join("\n");
+
+    const embed = {
+      title: `📊 Progress — Iteration ${metrics.iteration}`,
+      color: 0x9b59b6,
+      fields: [
+        { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+        { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+        { name: "\u200b", value: "\u200b", inline: true },
+        { name: "Agents", value: agentLines },
+      ],
+      footer: { text: this.projectName },
+    };
+
+    if (this.config.mode === "updates") {
+      await sendWebhook({ embeds: [embed] });
+    } else if (this.channel) {
+      await this.channel.send({ embeds: [embed] });
+    }
+  }
+
+  /**
+   * Interactive checkpoint — sends Discord buttons, awaits user response.
+   * Returns "continue", "stop", or "no-response" (caller falls back to terminal).
+   * Only works in interactive mode with an active bot connection.
+   */
+  async promptCheckpoint(metrics: RunMetrics): Promise<"continue" | "stop" | "no-response"> {
+    if (this.config.mode !== "interactive" || !this.channel) return "no-response";
+
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
+    const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
+    const agentLines = [...metrics.agentStatuses.values()]
+      .map((s) => `${statusEmoji(s.state)} \`${s.id}\` — ${s.lastActivity.slice(0, 60)}`)
+      .join("\n");
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("checkpoint_continue")
+        .setLabel("Continue")
+        .setStyle(ButtonStyle.Success)
+        .setEmoji("▶️"),
+      new ButtonBuilder()
+        .setCustomId("checkpoint_stop")
+        .setLabel("Stop")
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji("⏹️"),
+    );
+
+    const msg = await this.channel.send({
+      embeds: [
+        {
+          title: `⏸️ Checkpoint — Iteration ${metrics.iteration}`,
+          description: "The agent run is paused. **Continue** or **stop**?",
+          color: 0xf39c12,
+          fields: [
+            { name: "Elapsed", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+            { name: "Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+            { name: "\u200b", value: "\u200b", inline: true },
+            { name: "Agents", value: agentLines },
+          ],
+        },
+      ],
+      components: [row],
+    });
+
+    try {
+      const interaction = await msg.awaitMessageComponent({
+        filter: (i: any) => i.customId.startsWith("checkpoint_"),
+        time: 5 * 60 * 1000, // 5 minutes
+      });
+
+      const continued = interaction.customId === "checkpoint_continue";
+      await interaction.update({
+        embeds: [
+          {
+            title: continued ? "▶️ Continuing..." : "⏹️ Stopping...",
+            color: continued ? 0x2ecc71 : 0xe74c3c,
+          },
+        ],
+        components: [],
+      });
+
+      return continued ? "continue" : "stop";
+    } catch {
+      await msg.edit({
+        embeds: [{ title: "⏸️ No response — falling back to terminal", color: 0x95a5a6 }],
+        components: [],
+      });
+      return "no-response";
+    }
+  }
+
+  async notifyRunComplete(metrics: RunMetrics, projectConfig: ProjectConfig): Promise<void> {
+    if (this.config.mode === "off") return;
+
+    const elapsed = Math.round((Date.now() - metrics.startTime.getTime()) / 1000);
+    const agentLines = [...metrics.agentStatuses.values()]
+      .map(
+        (s) =>
+          `${statusEmoji(s.state)} \`${s.id}\` (${s.role}) — ${s.turns} turns, ~€${s.estimatedCostEur.toFixed(2)}`,
+      )
+      .join("\n");
+
+    const allDone = [...metrics.agentStatuses.values()].every((s) => s.state === "done");
+
+    const embed = {
+      title: allDone ? "✅ Agent Run Complete" : "⏹️ Agent Run Stopped",
+      description: `**${projectConfig.description}**`,
+      color: allDone ? 0x2ecc71 : 0xf39c12,
+      fields: [
+        { name: "Duration", value: `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`, inline: true },
+        { name: "Iterations", value: String(metrics.iteration), inline: true },
+        { name: "Total Cost", value: `~€${metrics.totalEstimatedCostEur.toFixed(2)}`, inline: true },
+        { name: "Agents", value: agentLines },
+      ],
+      footer: { text: "Results in workspace/results/" },
+      timestamp: new Date().toISOString(),
+    };
+
+    if (this.config.mode === "updates") {
+      await sendWebhook({ embeds: [embed] });
+    } else if (this.channel) {
+      await this.channel.send({ embeds: [embed] });
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.bot) {
+      this.bot.destroy();
+    }
   }
 }
 ```
@@ -883,6 +1250,13 @@ npx tsx src/run.ts
 
 # Override USD→EUR conversion rate (default: 0.92)
 # USD_TO_EUR_RATE=0.92
+
+# Discord — Status updates (webhook mode)
+# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# Discord — Interactive control (bot mode)
+# DISCORD_BOT_TOKEN=your-bot-token-here
+# DISCORD_CHANNEL_ID=your-channel-id-here
 ```
 
 ## Step 3 — Install dependencies and offer to run
