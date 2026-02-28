@@ -1015,7 +1015,7 @@ Judge prompt:
 Each pattern function must:
 - Accept `(config, metrics, abortController, dashboard, discord)` arguments
 - Compute `const logDir = path.join(config.workspacePath, "logs")` at the top
-- Pass `logDir`, `config.workspacePath`, and an `onQuestionDetected` callback as the last three arguments to every `runAgent()` call (after `onMessage`) — both dirs are needed for per-agent logs and the unified stream, and the callback triggers immediate question processing
+- Pass `logDir`, `config.workspacePath`, and an `onQuestionDetected` callback as the last three arguments to every `runAgent()` call (after `onMessage`) — both dirs are needed for per-agent logs and the unified stream, and the callback logs a QUEST event early (the question watcher picks up the file on its next 2s poll)
 - Check `abortController.signal.aborted` before each iteration
 - Call `checkLimits(metrics, config.stopConditions)` after each iteration
 - Call `promptCheckpoint(metrics, config.stopConditions, discord)` at checkpoint intervals
@@ -1293,6 +1293,7 @@ export class DiscordNotifier {
   private channel: any = null;
   private thread: any = null;
   private messageHandler: ((text: string, username: string) => void) | null = null;
+  private questionPending = false; // Suppress messageCreate during question prompts
 
   constructor(config: DiscordConfig, projectName: string) {
     this.config = config;
@@ -1351,6 +1352,8 @@ export class DiscordNotifier {
           if (msg.author.bot) return;
           // Only listen in our thread
           if (this.thread && msg.channel.id !== this.thread.id) return;
+          // Skip routing when a question prompt is active — let awaitMessages handle it
+          if (this.questionPending) return;
           // React to confirm receipt
           msg.react("👂").catch(() => {});
           // Route to handler with username for attribution
@@ -1488,6 +1491,7 @@ export class DiscordNotifier {
     // If already aborted (terminal answered first), return immediately
     if (abortSignal?.aborted) return null;
 
+    this.questionPending = true;
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
 
     const embed = {
@@ -1553,6 +1557,7 @@ export class DiscordNotifier {
         });
         return null;
       } finally {
+        this.questionPending = false;
         if (abortSignal) abortSignal.removeEventListener("abort", cleanup);
       }
     } else {
@@ -1584,6 +1589,7 @@ export class DiscordNotifier {
         await msg.edit({ embeds: [{ title: "⏰ Question timed out", color: 0x95a5a6 }] });
         return null;
       } finally {
+        this.questionPending = false;
         if (abortSignal) abortSignal.removeEventListener("abort", cleanup);
       }
     }
@@ -1604,7 +1610,7 @@ export class DiscordNotifier {
         title: `🔄 What happened after your message to ${agentId}`,
         description: body.slice(0, 4000),
         color: 0x9b59b6,
-        footer: { text: `${recentLines.length} events in the last 30s` },
+        footer: { text: `${recentLines.length} recent events` },
       }],
     });
   }
@@ -1880,6 +1886,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
   - `TASK ` — task assignment (yellow)
   - `DONE ` — result submitted (green, bold)
   - `QUEST` — agent question awaiting human answer (orange, bold)
+  - `WARN ` — low confidence flag or warning (yellow)
 - Inter-agent messages (`MSG`, `TASK`, `DONE`) are visually prominent — they show the communication flow between agents
 - `QUEST` events are highlighted in orange and bold — they indicate an agent is blocked and needs input
 
@@ -1909,7 +1916,7 @@ Generate a terminal UI with a **stream-first design**. The default view is the l
 
 **Recap view (`R`):**
 - Shows a high-level summary of the run, filtering the activity stream to important events only
-- Includes: `HMSG` (human messages), `QUEST` (questions), `DONE` (results), `ERROR` (errors), `START`/`END` (agent lifecycle), `MSG` (inter-agent messages)
+- Includes: `HMSG` (human messages), `QUEST` (questions), `DONE` (results), `ERROR` (errors), `WARN` (low confidence), `START`/`END` (agent lifecycle), `MSG` (inter-agent messages)
 - Excludes: `THINK` and `TOOL` noise
 - Displays milestones reached, questions asked/answered, key decisions, errors
 - Press `R` again to return to the full stream view
@@ -2182,7 +2189,7 @@ if [ -z "$FROM" ] || [ -z "$QUESTION" ]; then
   exit 1
 fi
 
-TIMESTAMP=$(date +%s%3N)
+TIMESTAMP=$(date +%s)$$
 FILE="workspace/questions/${FROM}-${TIMESTAMP}.json"
 
 if [ -n "$OPTIONS" ]; then
