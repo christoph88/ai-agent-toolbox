@@ -1,9 +1,8 @@
 {
   "name": "agent-toolbox",
   "version": "1.0.0",
-  "description": "macOS automation, scheduled tasks, and multi-agent systems.",
+  "description": "macOS automation and scheduled tasks.",
   "skills": [
-    "./.claude/skills/launchd",
-    "./.claude/skills/factory"
+    "./.claude/skills/launchd"
   ]
 }

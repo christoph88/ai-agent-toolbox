@@ -1,6 +1,6 @@
 # AI Agent Toolbox
 
-Claude Code plugin with general-purpose utilities for macOS automation, scheduled tasks, and multi-agent systems.
+Claude Code plugin with general-purpose utilities for macOS automation and scheduled tasks.
 
 ## Installation
 
@@ -33,38 +33,6 @@ Manages macOS scheduled tasks (LaunchAgents) via `launchd`. Supports three actio
 - **Remove a job** — unloads and/or deletes a plist after confirmation
 
 Always asks for explicit confirmation before any write or delete operation. Only manages user-level agents — never touches system daemons.
-
-### `/factory`
-
-Designs and generates multi-agent collaboration systems. Describe a task or problem, and it creates a standalone TypeScript project where multiple AI agents collaborate to solve it.
-
-**Two modes:**
-- **Assisted** — describe your problem, the skill designs the agent team for you
-- **Expert** — manually define agents, roles, tools, and patterns
-
-**Features:**
-- **Three collaboration patterns:** Orchestrator + Workers (delegation), Pipeline (sequential stages), Debate (parallel proposals + judge)
-- **Per-agent sandboxing** — restrict tools, filesystem access, and network per agent
-- **Real-time terminal dashboard** — live activity stream with color-coded events, estimated cost tracking in EUR
-- **Interactive messaging `[M]`** — interrupt a running agent and inject a human message; it resumes with full context
-- **Agent-to-human questions** — agents can ask the human for help when stuck; answerable via Discord buttons or terminal input; first response wins
-- **Log tailing `[T]`** — view any agent's conversation transcript live, Tab to cycle between agents, `_stream.log` for unified view
-- **Recap view `[R]`** — filtered view of important events only (milestones, questions, errors, decisions — no THINK/TOOL noise)
-- **Agent conversation logging** — full timestamped transcripts saved to `workspace/logs/`
-- **Configurable stop conditions** — max iterations, estimated cost cap, time limit, validation checks, checkpoint prompts
-- **Shared workspace** — agents communicate via a filesystem directory
-- **Discord integration** — three modes:
-  - **Off** — terminal only
-  - **Status updates** — webhook-based notifications for run start/completion
-  - **Interactive control** — full bot with thread-based conversations, message routing to orchestrator, agent question prompts with buttons, error escalation (Retry/Skip/Stop), confidence review, and post-message reaction summaries
-
-**Generated projects:**
-- Run with `npx tsx src/run.ts`
-- Use your existing Claude Code subscription (no API keys needed)
-- Fully editable — tweak `src/config.ts` and rerun
-- Include `README.md` and `CLAUDE.md` documentation
-
-**Requirements:** Node.js 18+, Claude Code CLI installed and authenticated
 
 ## Adding More Skills
 

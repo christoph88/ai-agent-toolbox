@@ -4,14 +4,13 @@ This file provides context for Claude Code when working in this repository.
 
 ## What This Repo Is
 
-Claude Code plugin — a general-purpose toolbox for macOS automation, scheduled tasks, and multi-agent systems. Distributed as a GitHub-based marketplace plugin — the repo **is** the distribution, no build step needed. Pushing to `master` auto-updates all users on their next session.
+Claude Code plugin — a general-purpose toolbox for macOS automation and scheduled tasks. Distributed as a GitHub-based marketplace plugin — the repo **is** the distribution, no build step needed. Pushing to `master` auto-updates all users on their next session.
 
 ## Skills
 
 | Skill | Purpose |
 |-------|---------|
 | `/launchd` | Manages macOS scheduled tasks (LaunchAgents) via launchd — list, add, and remove jobs |
-| `/factory` | Design and generate multi-agent collaboration systems with Discord interactive control, agent-to-human questions, and real-time dashboards |
 
 Skill definitions live in `.claude/skills/{skill-name}/SKILL.md`. Registration in `.claude-plugin/plugin.json`.
 
