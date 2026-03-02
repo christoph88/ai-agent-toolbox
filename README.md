@@ -63,16 +63,12 @@ The plugin stays in sync with the GitHub repo automatically:
 - **Automatic updates** — Claude Code checks for plugin updates at the start of each session. When changes are pushed to the repo, users get them on their next session.
 - **Manual refresh** — Open `/plugin` in Claude Code, go to the "Installed" tab, and refresh the plugin to pull the latest version immediately.
 - **No reinstall needed** — You only run `/plugin marketplace add` and `/plugin install` once. After that, updates flow through automatically.
-
-### Cache clearing
-
-If you're not seeing the latest changes, run the included cache-clearing script:
-
-```bash
-./clear-plugin-cache.sh
-```
-
-Then restart Claude Code.
+- **Manual cache clear** — If updates aren't showing, remove the marketplace and reinstall:
+  ```
+  /plugin marketplace remove agent-toolbox
+  /plugin marketplace add https://github.com/christoph88/ai-agent-toolbox
+  /plugin install ai-agent-toolbox@ai-agent-toolbox
+  ```
 
 ## Documentation
 

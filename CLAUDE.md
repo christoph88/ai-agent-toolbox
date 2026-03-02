@@ -19,7 +19,6 @@ Skill definitions live in `.claude/skills/{skill-name}/SKILL.md`. Registration i
 ```
 .claude/skills/          — Skill definitions (SKILL.md per skill)
 .claude-plugin/          — plugin.json (skill registry) + marketplace.json (distribution)
-clear-plugin-cache.sh    — Clears Claude Code plugin cache for manual refresh
 ```
 
 ## Plugin Config
