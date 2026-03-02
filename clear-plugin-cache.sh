@@ -1,11 +1,12 @@
 #!/bin/bash
-# Clears all Claude Code plugin caches for ai-agent-toolbox.
+# Clears Claude Code plugin caches for this marketplace.
 # Run this after pushing updates to force Claude Code to re-fetch on next session.
 
+MARKETPLACE="ai-agent-toolbox"
+
 DIRS=(
-  "$HOME/.claude/plugins/marketplaces/ai-agent-toolbox"
-  "$HOME/.claude/plugins/marketplaces/agent-toolbox"
-  "$HOME/.claude/plugins/cache/ai-agent-toolbox"
+  "$HOME/.claude/plugins/marketplaces/$MARKETPLACE"
+  "$HOME/.claude/plugins/cache/$MARKETPLACE"
 )
 
 cleared=0
