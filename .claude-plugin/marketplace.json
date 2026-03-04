@@ -9,10 +9,7 @@
   "plugins": [
     {
       "name": "agent-toolbox",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/christoph88/ai-agent-toolbox.git"
-      },
+      "source": ".",
       "description": "macOS automation and scheduled tasks."
     }
   ]
