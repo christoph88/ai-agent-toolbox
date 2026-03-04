@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "agent-toolbox",
-      "source": ".",
+      "source": "./",
       "description": "macOS automation and scheduled tasks."
     }
   ]
