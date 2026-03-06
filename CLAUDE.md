@@ -11,6 +11,7 @@ Claude Code plugin — a general-purpose toolbox for macOS automation and schedu
 | Skill | Purpose |
 |-------|---------|
 | `/launchd` | Manages macOS scheduled tasks (LaunchAgents) via launchd — list, add, and remove jobs |
+| `/mv-digital-performance-analysis` | Analyse Mobile Vikings digital campaign performance using funnel framework, GA4, HubSpot, and Budskap data |
 
 Skill definitions live in `.claude/skills/{skill-name}/SKILL.md`. Registration in `.claude-plugin/plugin.json`.
 

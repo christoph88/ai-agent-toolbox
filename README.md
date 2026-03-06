@@ -34,6 +34,15 @@ Manages macOS scheduled tasks (LaunchAgents) via `launchd`. Supports three actio
 
 Always asks for explicit confirmation before any write or delete operation. Only manages user-level agents — never touches system daemons.
 
+### `/mv-digital-performance-analysis`
+
+Analyses Mobile Vikings digital campaign performance using the internal funnel framework (F1-F6 phases), campaign naming conventions, and multiple data sources:
+
+- **Funnel analysis** — tracks conversion through F1 (landing) to F6 (share) phases per KPI category
+- **Campaign structure** — understands naming conventions (`KPI_Channel_LANGUAGE_TARGETTING_GOAL_FUNNELS_SUBTYPE_Campaign_year`)
+- **Data sources** — GA4 (website behavior), HubSpot (email), Budskap (push/pull), Notion (campaign management)
+- **Segmentation** — breaks down by language (BENL/BEFR/BEEN), targeting (TACT/RMKT/DRMKT), channel, and subtype
+
 ## Adding More Skills
 
 This plugin is designed as a general-purpose toolbox. To add new utility skills:
