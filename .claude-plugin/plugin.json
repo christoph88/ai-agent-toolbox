@@ -4,6 +4,7 @@
   "description": "macOS automation and scheduled tasks.",
   "skills": [
     "./.claude/skills/launchd",
-    "./.claude/skills/mv-digital-performance-analysis"
+    "./.claude/skills/mv-digital-performance-analysis",
+    "./.claude/skills/agent-security-auditor"
   ]
 }
